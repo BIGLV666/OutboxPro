@@ -1,0 +1,29 @@
+# OutboxPro
+target/
+*.class
+*.jar
+!mvnw
+!.mvn/wrapper/maven-wrapper.jar
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.settings/
+.classpath
+.project
+
+# 日志与本地运行产物
+*.log
+app-run.log
+hs_err_pid*
+replay_pid*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 本地工具内部数据
+.mimosa/

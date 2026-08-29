@@ -1,0 +1,41 @@
+outboxpro:
+  schema-initialize: true
+  enabled: true
+  producer-name: ${spring.application.name:application}
+  producer:
+    enabled: true
+    relay-enabled: true
+    batch-size: 100
+    poll-interval: 1s
+    claim-timeout: 60s
+    confirm-timeout: 10s
+  consumer:
+    enabled: true
+    concurrency: 3
+    prefetch: 50
+    idempotency-enabled: true
+  retry:
+    enabled: true
+    max-attempts: 5
+    initial-delay: 1s
+    multiplier: 2
+    max-delay: 5m
+  observability:
+    enabled: true
+    message-log-enabled: true
+  dlq:
+    handling-mode: FRAMEWORK  # FRAMEWORK: 框架发布 RabbitMQ DLQ; CUSTOM: 用户策略完全接管
+    ledger:
+      enabled: true
+      schema-initialize: true
+      counter-buckets: 32
+      max-replay-count: 3
+    replay:
+      enabled: false  # 默认关闭，避免未授权重放；启用时必须配合 Spring Security 或自定义授权
+    alert:
+      enabled: true
+      poll-interval: 1m
+      threshold: 100
+      recovery-threshold: 80
+      cooldown: 15m
+

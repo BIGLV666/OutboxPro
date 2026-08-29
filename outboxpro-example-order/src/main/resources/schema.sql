@@ -1,0 +1,12 @@
+-- 示例业务表（幂等建表）；OutboxPro 框架表（outboxpro_outbox 等）由框架的 schema-initialize 自动创建
+CREATE TABLE IF NOT EXISTS orders (
+    id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    amount DECIMAL(10, 2) NOT NULL,
+    status VARCHAR(32) NOT NULL DEFAULT 'CREATED',
+    created_time DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS inventory_reservation (
+    order_id BIGINT NOT NULL PRIMARY KEY,
+    reserved_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

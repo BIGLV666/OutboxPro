@@ -1,0 +1,54 @@
+spring:
+  application:
+    name: order-service
+  datasource:
+    url: jdbc:mysql://localhost:3306/order_demo?useUnicode=true&characterEncoding=utf8&serverTimezone=UTC&useSSL=false&allowPublicKeyRetrieval=true
+    username: root
+    password: root
+  # 业务表结构由应用自管（幂等建表）；OutboxPro 框架表由 outboxpro.schema-initialize 自动创建
+  sql:
+    init:
+      mode: always
+  rabbitmq:
+    host: localhost
+    port: 5672
+    username: guest
+    password: guest
+
+server:
+  port: 8080
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: "*"
+
+outboxpro:
+  producer-name: ${spring.application.name}
+  schema-initialize: true
+  producer:
+    relay-enabled: true
+    batch-size: 50
+    poll-interval: 500ms
+    confirm-timeout: 10s
+  consumer:
+    concurrency: 2
+    prefetch: 20
+  retry:
+    max-attempts: 3
+    initial-delay: 2s
+    multiplier: 2
+    max-delay: 30s
+  dlq:
+    handling-mode: FRAMEWORK
+    ledger:
+      enabled: true
+      max-replay-count: 3
+    # 示例开启重放端点用于演示；生产环境默认关闭，开启前必须接入真实授权
+    replay:
+      enabled: true
+    alert:
+      enabled: true
+      threshold: 5
+      recovery-threshold: 2
