@@ -2,6 +2,7 @@
     <modelVersion>4.0.0</modelVersion>
     <parent><groupId>io.github.biglv666</groupId><artifactId>outboxpro-parent</artifactId><version>1.0.0</version></parent>
     <artifactId>outboxpro-transport-rabbit</artifactId>
+    <name>OutboxPro Transport RabbitMQ</name>
     <dependencies>
         <dependency><groupId>io.github.biglv666</groupId><artifactId>outboxpro-transport</artifactId><version>${project.version}</version></dependency>
         <dependency><groupId>io.github.biglv666</groupId><artifactId>outboxpro-persistence</artifactId><version>${project.version}</version></dependency>

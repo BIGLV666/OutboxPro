@@ -2,6 +2,7 @@
     <modelVersion>4.0.0</modelVersion>
     <parent><groupId>io.github.biglv666</groupId><artifactId>outboxpro-parent</artifactId><version>1.0.0</version></parent>
     <artifactId>outboxpro-spring-boot-starter</artifactId>
+    <name>OutboxPro Spring Boot Starter</name>
     <dependencies>
         <dependency><groupId>io.github.biglv666</groupId><artifactId>outboxpro-spring-boot-autoconfigure</artifactId><version>${project.version}</version></dependency>
         <dependency><groupId>io.github.biglv666</groupId><artifactId>outboxpro-persistence-mysql</artifactId><version>${project.version}</version></dependency>
