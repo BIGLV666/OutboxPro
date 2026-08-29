@@ -70,15 +70,11 @@ String eventId = envelope.getEventId();
 <dependency>
     <groupId>io.github.biglv666</groupId>
     <artifactId>outboxpro-spring-boot-starter</artifactId>
-    <version>1.0.0-SNAPSHOT</version>
+    <version>1.0.0</version>
 </dependency>
 ```
 
-如果当前项目还没有安装本地快照版本，先在 OutboxPro 根目录执行：
-
-```powershell
-mvn install -DskipTests
-```
+1.0.0 已发布到 Maven Central，直接依赖即可使用。
 
 ### 3.2 application.yml
 
