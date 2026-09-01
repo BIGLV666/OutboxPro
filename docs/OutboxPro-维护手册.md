@@ -1,6 +1,6 @@
 # OutboxPro V1 维护手册
 
-> 适用版本：V1 / `1.0.0-SNAPSHOT`  
+> 适用版本：V1 / `1.1.0`  
 > 当前技术范围：Java 21、Spring Boot 3.5.x、MySQL 8、RabbitMQ、Spring JDBC、Jackson  
 > 文档目的：指导开发、排障、升级、发布和线上运行维护。
 
