@@ -5,7 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.rabbitmq.client.Channel;
 import org.outboxpro.core.context.EventContext;
 import org.outboxpro.core.envelope.EventEnvelope;
-import org.outboxpro.core.exception.NonRetryableEventException;
+import org.outboxpro.core.exception.NonRetryableExceptions;
 import org.outboxpro.core.handler.OutboxProHandler;
 import org.outboxpro.core.metrics.OutboxMetrics;
 import org.outboxpro.core.subscription.ConsumeMode;
@@ -267,7 +267,9 @@ public final class RabbitConsumerManager implements AutoCloseable {
                                Channel channel, long deliveryTag, String eventId, String eventType,
                                String receivedRoutingKey, int attempt,
                                long startedNanos, RuntimeException error) throws Exception {
-        boolean retryable = !(error instanceof NonRetryableEventException)
+        // 不可重试（框架异常或 @NonRetryable 标注）或已耗尽次数时，通过死信协调器处理。
+        boolean nonRetryable = NonRetryableExceptions.isNonRetryable(error);
+        boolean retryable = !nonRetryable
                 && binding.retryPolicy().enabled()
                 && attempt < binding.retryPolicy().maxAttempts();
         try {

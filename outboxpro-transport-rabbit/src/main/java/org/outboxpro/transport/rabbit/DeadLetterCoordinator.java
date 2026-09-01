@@ -1,6 +1,7 @@
 package org.outboxpro.transport.rabbit;
 
 import org.outboxpro.core.exception.NonRetryableEventException;
+import org.outboxpro.core.exception.NonRetryableExceptions;
 import org.outboxpro.core.subscription.EventBinding;
 import org.outboxpro.core.subscription.OutboxProSubscription;
 import org.outboxpro.spi.deadletter.*;
@@ -216,8 +217,8 @@ public final class DeadLetterCoordinator {
             // JSON 解析失败或消息结构不合法，继续重试没有意义。
             return DeadLetterReasonCode.MALFORMED_MESSAGE;
         }
-        if (hasCause(error, NonRetryableEventException.class)) {
-            // 业务明确声明不可重试，即使异常被调用链包装也必须保留原语义。
+        if (hasCause(error, NonRetryableEventException.class) || NonRetryableExceptions.isNonRetryable(error)) {
+            // 业务明确声明不可重试（框架异常或 @NonRetryable 标注），即使异常被调用链包装也必须保留原语义。
             return DeadLetterReasonCode.NON_RETRYABLE_EXCEPTION;
         }
         if (binding == null) {
@@ -241,6 +242,7 @@ public final class DeadLetterCoordinator {
      */
     private boolean isRetryable(RuntimeException error, EventBinding binding) {
         return !hasCause(error, NonRetryableEventException.class)
+                && !NonRetryableExceptions.isNonRetryable(error)
                 && binding != null
                 && binding.retryPolicy().enabled();
     }

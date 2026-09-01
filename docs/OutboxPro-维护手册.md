@@ -161,7 +161,11 @@ WHERE status = 'PROCESSING'
   AND claimed_time < DATE_SUB(NOW(), INTERVAL 10 MINUTE);
 ```
 
-人工重放 `DEAD` 消息的正式接口尚未实现。V1 暂时只能经过人工审核后执行：
+人工重放 `DEAD` 消息的正式接口已于 V1.1 交付：设置 `outboxpro.ops.enabled=true` 后调用
+`POST /actuator/outboxpro-ops/outbox/{eventId}/replay`（需配置 `DlqReplayAuthorizer`，
+详见 DLQ-README「死信台账与 Outbox 检索」一节）。该接口把 DEAD 记录条件复位为 PENDING
+（重试次数清零），由 Relay 正常认领并等待 Publisher Confirm，成功后才标记 SENT。
+没有开启运维端点时仍可人工执行：
 
 ```sql
 UPDATE outboxpro_outbox
@@ -346,10 +350,22 @@ DLQ：inventory.queue.dlq
 
 ## 9. 当前已知限制
 
-P1 已于 2026-08-29 全部收官，当前仅剩发布前事项：
+P1 已于 2026-08-29 全部收官；V1.1（2026-09-02）交付以下能力，均带 Testcontainers 集成测试：
 
-1. 尚未配置 Maven Central 发布所需的许可证、签名和 release profile；
-2. 1.0.0 正式发布前需冻结 Core/SPI 公共 API、配置属性名与数据库表结构。
+- 注解式声明：`@OutboxEvent`（载荷类）+ `@OutboxHandler`（Handler 类）+
+  `AnnotatedOutboxHandler` 基类，自动生成事件定义与订阅（`AnnotationDrivenOutboxRegistrar`）；
+- 类型安全发布：`publish(Class<T> payloadType, T payload[, extensions])`，按载荷类型反查唯一事件定义；
+- `@NonRetryable` 异常标注：沿父类与因果链识别，命中即跳过重试直接进死信；
+- 运维查询端点 `/actuator/outboxpro-ops`（默认关闭）：Outbox/死信分页检索、单条详情、
+  生产端 DEAD 消息重放（`OutboxRepository`/`DeadLetterRepository` 新增 default 查询方法，
+  旧自定义仓储实现保持二进制兼容）；
+- 事件级重试策略：`@OutboxHandler(retry = @RetryPolicySpec(...))` 覆盖全局配置。
+
+发布前事项：
+
+1. 1.1.0 发布前需同步冻结 V1.1 新增公共 API（`org.outboxpro.core.annotation` 包、
+   `AnnotatedOutboxHandler`、`NonRetryableExceptions`、`OutboxProPublisher` 类型安全重载、
+   SPI 查询方法、`outboxpro.ops` 配置段）。
 
 已于 2026-08-29 完成、从限制清单移除的项：
 

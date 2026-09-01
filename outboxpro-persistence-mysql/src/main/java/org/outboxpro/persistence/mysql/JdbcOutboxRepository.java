@@ -213,4 +213,129 @@ public class JdbcOutboxRepository implements OutboxRepository {
                 nextRetryTime == null ? null : nextRetryTime.toInstant(),
                 resultSet.getString("claim_owner"), claimedTime == null ? null : claimedTime.toInstant());
     }
+
+    /**
+     * 按条件分页检索 Outbox 消息。
+     * 状态字段先过白名单再进 SQL，事件类型走参数绑定，杜绝检索输入带来的注入风险。
+     *
+     * @param query 检索条件
+     * @return 按 id 倒序排列的命中记录
+     */
+    @Override
+    public List<OutboxRecord> findMessages(org.outboxpro.spi.persistence.OutboxQuery query) {
+        String status = sanitizeStatus(query.status());
+        if (status == null && query.status() != null && !query.status().isBlank()) {
+            return List.of();
+        }
+        StringBuilder where = new StringBuilder();
+        List<Object> args = new ArrayList<>();
+        if (status != null) {
+            where.append("status = ?");
+            args.add(status);
+        }
+        if (query.eventType() != null && !query.eventType().isBlank()) {
+            appendAnd(where);
+            where.append("event_type = ?");
+            args.add(query.eventType());
+        }
+        String sql = """
+                SELECT id, event_id, event_type, schema_version, producer,
+                       exchange_name, routing_key, payload_json,
+                       trace_id, correlation_id, causation_id,
+                       status, attempt_count, next_retry_time, claim_owner, claimed_time
+                FROM outboxpro_outbox
+                %s
+                ORDER BY id DESC
+                LIMIT ? OFFSET ?
+                """.formatted(where.isEmpty() ? "" : "WHERE " + where);
+        args.add(Math.min(query.limit(), MAX_QUERY_LIMIT));
+        args.add(Math.max(query.offset(), 0));
+        return jdbc.query(sql, this::map, args.toArray());
+    }
+
+    /**
+     * 统计检索条件命中的消息总数。
+     *
+     * @param query 检索条件
+     * @return 命中总数
+     */
+    @Override
+    public long countMessages(org.outboxpro.spi.persistence.OutboxQuery query) {
+        String status = sanitizeStatus(query.status());
+        if (status == null && query.status() != null && !query.status().isBlank()) {
+            return 0L;
+        }
+        StringBuilder where = new StringBuilder();
+        List<Object> args = new ArrayList<>();
+        if (status != null) {
+            where.append("status = ?");
+            args.add(status);
+        }
+        if (query.eventType() != null && !query.eventType().isBlank()) {
+            appendAnd(where);
+            where.append("event_type = ?");
+            args.add(query.eventType());
+        }
+        String sql = "SELECT COUNT(*) FROM outboxpro_outbox %s"
+                .formatted(where.isEmpty() ? "" : "WHERE " + where);
+        Long count = jdbc.queryForObject(sql, Long.class, args.toArray());
+        return count == null ? 0L : count;
+    }
+
+    /**
+     * 按事件 ID 精确查询单条 Outbox 消息（含载荷）。
+     *
+     * @param eventId 事件唯一 ID
+     * @return 命中记录；不存在时为 {@code null}
+     */
+    @Override
+    public OutboxRecord findByEventId(String eventId) {
+        List<OutboxRecord> records = jdbc.query("""
+                SELECT id, event_id, event_type, schema_version, producer,
+                       exchange_name, routing_key, payload_json,
+                       trace_id, correlation_id, causation_id,
+                       status, attempt_count, next_retry_time, claim_owner, claimed_time
+                FROM outboxpro_outbox
+                WHERE event_id = ?
+                """, this::map, eventId);
+        return records.isEmpty() ? null : records.get(0);
+    }
+
+    /**
+     * 把 DEAD 消息复位为 PENDING，交还 Relay 重新投递。
+     * 条件更新只允许 DEAD 状态参与迁移，避免与正常状态机互相破坏。
+     *
+     * @param eventId 事件唯一 ID
+     * @return 是否成功复位
+     */
+    @Override
+    public boolean resetDeadForReplay(String eventId) {
+        int updated = jdbc.update("""
+                UPDATE outboxpro_outbox
+                SET status = 'PENDING', attempt_count = 0, next_retry_time = NULL,
+                    claim_owner = NULL, claimed_time = NULL,
+                    updated_time = NOW(), version = version + 1
+                WHERE event_id = ? AND status = 'DEAD'
+                """, eventId);
+        return updated == 1;
+    }
+
+    /** 运维检索单页行数上限，防止一次性拉取大结果集。 */
+    private static final int MAX_QUERY_LIMIT = 200;
+
+    /** 校验状态过滤值：命中白名单返回大写形式，空白视为不过滤，其余返回 null 表示无结果。 */
+    private String sanitizeStatus(String status) {
+        if (status == null || status.isBlank()) {
+            return null;
+        }
+        String normalized = status.trim().toUpperCase();
+        return org.outboxpro.spi.persistence.OutboxQuery.ALLOWED_STATUSES.contains(normalized) ? normalized : null;
+    }
+
+    /** 向动态 WHERE 子句追加 AND 连接符。 */
+    private void appendAnd(StringBuilder where) {
+        if (!where.isEmpty()) {
+            where.append(" AND ");
+        }
+    }
 }

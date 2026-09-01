@@ -35,6 +35,7 @@ import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitAdmin;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.amqp.RabbitAutoConfiguration;
 import org.springframework.boot.autoconfigure.AutoConfigureAfter;
@@ -98,6 +99,18 @@ public class OutboxProAutoConfiguration {
     EventRegistryInitializer outboxProEventRegistryInitializer(
             EventRegistry registry, ObjectProvider<EventDefinition<?>> definitions) {
         return new EventRegistryInitializer(registry, definitions.orderedStream().toList());
+    }
+
+    /**
+     * 注解式装配：扫描 @OutboxHandler Bean，生成事件定义与队列订阅。
+     * 没有任何注解式 Handler 时为空操作；业务方可通过注册同名 Bean 完全接管。
+     */
+    @Bean
+    @ConditionalOnMissingBean
+    AnnotationDrivenOutboxRegistrar outboxProAnnotationDrivenRegistrar(
+            EventRegistry registry, ObjectProvider<OutboxProHandler<?>> handlers,
+            ConfigurableListableBeanFactory beanFactory) {
+        return new AnnotationDrivenOutboxRegistrar(registry, handlers.orderedStream().toList(), beanFactory);
     }
 
     /** 提供默认 Jackson 序列化器；用户可替换为 Avro、Protobuf 或受控 JSON 实现。 */
@@ -363,9 +376,10 @@ public class OutboxProAutoConfiguration {
 
     /**
      * 在启动 Consumer 前声明拓扑，避免 Listener 先启动导致 Queue 不存在或 Binding 未完成。
+     * 依赖注解式注册器先完成订阅单例注册。
      */
     @Bean(initMethod = "initialize")
-    @DependsOn("outboxProEventRegistryInitializer")
+    @DependsOn({"outboxProEventRegistryInitializer", "outboxProAnnotationDrivenRegistrar"})
     @ConditionalOnBean(TopologyManager.class)
     SubscriptionTopologyInitializer outboxProSubscriptionTopologyInitializer(
             TopologyManager manager, ObjectProvider<OutboxProSubscription> subscriptions) {
@@ -391,6 +405,28 @@ public class OutboxProAutoConfiguration {
                 subscriptions.orderedStream().toList(), handlers.orderedStream().toList(), logSink,
                 deadLetterCoordinator, metrics.getIfAvailable(() -> OutboxMetrics.NOOP),
                 properties.getConsumer().getConcurrency(), properties.getConsumer().getPrefetch());
+    }
+
+    /**
+     * 运维查询端点：Outbox 检索、DEAD 重放与死信台账检索。
+     * 默认关闭（outboxpro.ops.enabled=false），开启前应确认已配置 DlqReplayAuthorizer。
+     */
+    @Bean
+    @ConditionalOnClass(name = {
+            "org.springframework.boot.actuate.endpoint.web.annotation.RestControllerEndpoint",
+            "org.springframework.web.bind.annotation.GetMapping"
+    })
+    @ConditionalOnBean({OutboxRepository.class, DeadLetterRepository.class})
+    @ConditionalOnProperty(prefix = "outboxpro.ops", name = "enabled", havingValue = "true")
+    @ConditionalOnMissingBean
+    OutboxOpsEndpoint outboxProOpsEndpoint(
+            OutboxRepository outboxRepository,
+            DeadLetterRepository deadLetterRepository,
+            ObjectProvider<DlqReplayAuthorizer> authorizer) {
+        DlqReplayAuthorizer defaultDeny = (scope, operator) -> {
+            throw new SecurityException("No DlqReplayAuthorizer bean is configured for ops scope " + scope);
+        };
+        return new OutboxOpsEndpoint(outboxRepository, deadLetterRepository, authorizer.getIfAvailable(() -> defaultDeny));
     }
 }
 

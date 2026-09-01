@@ -26,7 +26,7 @@ OutboxPro 是面向 Spring Boot 的事务消息与 RabbitMQ 操作简化组件�
 <dependency>
     <groupId>io.github.biglv666</groupId>
     <artifactId>outboxpro-spring-boot-starter</artifactId>
-    <version>1.0.0</version>
+    <version>1.1.0-SNAPSHOT</version>
 </dependency>
 ```
 
@@ -115,10 +115,43 @@ public class OrderCreatedHandler implements OutboxProHandler<OrderCreated> {
 public void createOrder(CreateOrderCommand command) {
     Order order = saveOrder(command);
     publisher.publish("order.created", new OrderCreated(order.getId()));
+    // V1.1：类型安全发布，无需手写 eventType 字符串
+    // publisher.publish(OrderCreated.class, new OrderCreated(order.getId()));
 }
 ```
 
 业务表和 Outbox 表写入同一个本地事务；Relay 在事务外完成 RabbitMQ 发布并等待 Publisher Confirm。
+
+## 注解式声明（V1.1，推荐）
+
+```java
+@OutboxEvent(eventType = "order.created", exchange = "order.exchange")
+public record OrderCreated(Long orderId) { }
+
+@Component
+@OutboxHandler(event = OrderCreated.class, queue = "inventory-service.queue",
+        consumerName = "inventory-service")
+public class OrderCreatedHandler extends AnnotatedOutboxHandler<OrderCreated> {
+    @Override public void handle(EventContext<OrderCreated> context) {
+        // 只写业务逻辑；事件定义、订阅、Inbox、ACK、重试、死信全部由框架处理
+    }
+}
+```
+
+替代手写 `EventDefinition` / `OutboxProSubscription` Bean；`retry = @RetryPolicySpec(...)` 支持
+事件级重试策略覆盖。详见 [快速开始与公共 API](docs/OutboxPro-快速开始与公共API.md) 第 8 节。
+
+## 运维查询端点（V1.1，默认关闭）
+
+```yaml
+outboxpro:
+  ops:
+    enabled: true
+```
+
+开启后提供 `/actuator/outboxpro-ops`：Outbox 与死信台账分页检索、消息详情，
+以及生产端 DEAD 消息重放（`POST /outbox/{eventId}/replay`）。鉴权复用 `DlqReplayAuthorizer` SPI，
+未配置授权器时默认拒绝；详见 [DLQ 功能文档](docs/DLQ-README.md)。
 
 ## 可靠性语义
 

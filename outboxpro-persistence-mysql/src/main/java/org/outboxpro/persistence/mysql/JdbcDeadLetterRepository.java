@@ -405,6 +405,79 @@ public class JdbcDeadLetterRepository implements DeadLetterRepository {
     private String truncate(String value) {
         return value == null ? null : value.substring(0, Math.min(value.length(), 2000));
     }
+
+    /**
+     * 按条件分页检索死信台账。
+     * 全部条件走参数绑定，状态为枚举安全转换，杜绝检索输入带来的注入风险。
+     *
+     * @param query 检索条件
+     * @return 按 id 倒序排列的命中记录
+     */
+    @Override
+    public List<DeadLetterRecord> findDeadLetters(org.outboxpro.spi.deadletter.DeadLetterQuery query) {
+        List<Object> args = new ArrayList<>();
+        String where = buildDeadLetterWhere(query, args);
+        String sql = """
+                SELECT id, event_id, event_type, consumer_name, queue_name,
+                       original_exchange, original_routing_key, payload_json, attempt_count,
+                       reason_code, reason_retryable, reason_retry_exhausted,
+                       exception_type, exception_message, status, replay_count, replay_owner,
+                       replayed_time, last_replay_operator, last_replay_reason, last_replay_error,
+                       created_time, updated_time
+                FROM outboxpro_dead_letter
+                %s
+                ORDER BY id DESC
+                LIMIT ? OFFSET ?
+                """.formatted(where);
+        args.add(Math.min(query.limit(), MAX_QUERY_LIMIT));
+        args.add(Math.max(query.offset(), 0));
+        return jdbc.query(sql, this::map, args.toArray());
+    }
+
+    /**
+     * 统计检索条件命中的死信总数。
+     *
+     * @param query 检索条件
+     * @return 命中总数
+     */
+    @Override
+    public long countDeadLetters(org.outboxpro.spi.deadletter.DeadLetterQuery query) {
+        List<Object> args = new ArrayList<>();
+        String where = buildDeadLetterWhere(query, args);
+        String sql = "SELECT COUNT(*) FROM outboxpro_dead_letter %s".formatted(where);
+        Long count = jdbc.queryForObject(sql, Long.class, args.toArray());
+        return count == null ? 0L : count;
+    }
+
+    /** 运维检索单页行数上限，防止一次性拉取大结果集。 */
+    private static final int MAX_QUERY_LIMIT = 200;
+
+    /** 由检索条件构建动态 WHERE 子句并填充绑定参数。 */
+    private String buildDeadLetterWhere(org.outboxpro.spi.deadletter.DeadLetterQuery query, List<Object> args) {
+        StringBuilder where = new StringBuilder();
+        if (query.eventType() != null && !query.eventType().isBlank()) {
+            where.append("event_type = ?");
+            args.add(query.eventType());
+        }
+        if (query.consumerName() != null && !query.consumerName().isBlank()) {
+            appendWhereAnd(where);
+            where.append("consumer_name = ?");
+            args.add(query.consumerName());
+        }
+        if (query.status() != null) {
+            appendWhereAnd(where);
+            where.append("status = ?");
+            args.add(query.status().name());
+        }
+        return where.isEmpty() ? "" : "WHERE " + where;
+    }
+
+    /** 向动态 WHERE 子句追加 AND 连接符。 */
+    private void appendWhereAnd(StringBuilder where) {
+        if (!where.isEmpty()) {
+            where.append(" AND ");
+        }
+    }
 }
 
 

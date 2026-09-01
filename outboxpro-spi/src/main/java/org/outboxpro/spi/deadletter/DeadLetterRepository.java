@@ -118,4 +118,25 @@ public interface DeadLetterRepository {
      * @return PENDING_REPLAY 状态的精确总数
      */
     long pendingReplayCount();
+
+    /**
+     * 按条件分页检索死信台账，供运维查询使用。
+     * 返回按 id 倒序排列，条件字段全部精确匹配。
+     *
+     * @param query 检索条件
+     * @return 命中的死信记录（含原始载荷）；不支持检索的实现返回空列表
+     */
+    default List<DeadLetterRecord> findDeadLetters(DeadLetterQuery query) {
+        return List.of();
+    }
+
+    /**
+     * 统计检索条件命中的死信总数，供运维分页展示。
+     *
+     * @param query 检索条件
+     * @return 命中总数；不支持检索的实现返回 0
+     */
+    default long countDeadLetters(DeadLetterQuery query) {
+        return 0L;
+    }
 }

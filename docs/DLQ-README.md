@@ -164,6 +164,45 @@ Content-Type: application/json
 2. 配合 Spring Security 限制访问权限
 3. 记录操作人和重放原因，支持审计追溯
 
+### 死信台账与 Outbox 检索（V1.1 新增）
+
+V1.1 提供 `@RestControllerEndpoint(id = "outboxpro-ops")` 运维端点，需要显式开启：
+
+```yaml
+outboxpro:
+  ops:
+    enabled: true    # 默认 false
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: outboxpro,outboxpro-ops
+```
+
+可用接口：
+
+```bash
+# 死信台账分页检索（视图不含 payload，避免大响应）
+GET /actuator/outboxpro-ops/dlq?status=PENDING_REPLAY&eventType=&consumerName=&page=0&size=20&operator=admin@example.com
+
+# Outbox 消息分页检索
+GET /actuator/outboxpro-ops/outbox?status=DEAD&eventType=&page=0&size=20&operator=admin@example.com
+
+# Outbox 单条详情（含 payload）
+GET /actuator/outboxpro-ops/outbox/{eventId}?operator=admin@example.com
+
+# 生产端 DEAD 消息人工重放：状态复位为 PENDING，交还 Relay 重新投递
+POST /actuator/outboxpro-ops/outbox/{eventId}/replay
+Content-Type: application/json
+
+{ "operator": "admin@example.com", "reason": "rabbit outage fixed" }
+```
+
+鉴权复用 `DlqReplayAuthorizer` SPI：检索与重放调用会以固定 scope
+（`outbox:list` / `outbox:replay` / `dlq:list`）作为 `eventId` 参数调用 `authorize(scope, operator)`，
+实现方应按 scope 判权；未配置授权器时所有调用默认拒绝。
+
 ## 性能特性
 
 ### 1. 批量认领优化

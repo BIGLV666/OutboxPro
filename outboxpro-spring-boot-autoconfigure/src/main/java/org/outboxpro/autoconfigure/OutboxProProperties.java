@@ -18,6 +18,7 @@ public class OutboxProProperties {
     private Observability observability = new Observability();
     private DeadLetterQueueProperties dlq = new DeadLetterQueueProperties();
     private boolean schemaInitialize = true;
+    private Ops ops = new Ops();
 
     /** 返回是否启用 OutboxPro 自动装配。 */
     public boolean isEnabled() { return enabled; }
@@ -51,6 +52,21 @@ public class OutboxProProperties {
     public boolean isSchemaInitialize() { return schemaInitialize; }
     /** 设置是否自动执行 MySQL OutboxPro DDL。 */
     public void setSchemaInitialize(boolean schemaInitialize) { this.schemaInitialize = schemaInitialize; }
+    /** 返回运维端点配置。 */
+    public Ops getOps() { return ops; }
+    /** 设置运维端点配置。 */
+    public void setOps(Ops ops) { this.ops = ops; }
+
+    /** 运维查询端点配置。 */
+    public static class Ops {
+        /** 默认关闭：检索端点会暴露消息与死信元数据，必须显式开启并配置授权器。 */
+        private boolean enabled = false;
+
+        /** 返回是否启用运维查询端点。 */
+        public boolean isEnabled() { return enabled; }
+        /** 设置是否启用运维查询端点。 */
+        public void setEnabled(boolean enabled) { this.enabled = enabled; }
+    }
 
     /** 生产端 Relay 和 Publisher Confirm 配置。 */
     public static class Producer {

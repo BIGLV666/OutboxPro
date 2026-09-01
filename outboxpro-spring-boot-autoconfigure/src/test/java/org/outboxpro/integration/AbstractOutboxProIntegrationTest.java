@@ -57,6 +57,10 @@ public abstract class AbstractOutboxProIntegrationTest {
         registry.add("spring.rabbitmq.port", () -> rabbit().getAmqpPort());
         registry.add("spring.rabbitmq.username", () -> rabbit().getAdminUsername());
         registry.add("spring.rabbitmq.password", () -> rabbit().getAdminPassword());
+        // 单例 MySQL 容器被所有 Spring 上下文共享；限制每个上下文的连接池大小，
+        // 避免上下文数量增长后触发 MySQL "Too many connections"。
+        registry.add("spring.datasource.hikari.maximum-pool-size", () -> "3");
+        registry.add("spring.datasource.hikari.minimum-idle", () -> "1");
     }
 
     /**
@@ -146,6 +150,22 @@ public abstract class AbstractOutboxProIntegrationTest {
                 case "msglog" -> {
                     statement.execute("CREATE DATABASE IF NOT EXISTS outbox_it_msglog");
                     yield "outbox_it_msglog";
+                }
+                case "ext" -> {
+                    statement.execute("CREATE DATABASE IF NOT EXISTS outbox_it_ext");
+                    yield "outbox_it_ext";
+                }
+                case "anno" -> {
+                    statement.execute("CREATE DATABASE IF NOT EXISTS outbox_it_anno");
+                    yield "outbox_it_anno";
+                }
+                case "ops" -> {
+                    statement.execute("CREATE DATABASE IF NOT EXISTS outbox_it_ops");
+                    yield "outbox_it_ops";
+                }
+                case "nonretry" -> {
+                    statement.execute("CREATE DATABASE IF NOT EXISTS outbox_it_nonretry");
+                    yield "outbox_it_nonretry";
                 }
                 default -> throw new IllegalArgumentException("未登记的测试数据库键: " + key);
             };

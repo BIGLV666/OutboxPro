@@ -375,9 +375,84 @@ OutboxProHandler.payloadType()
 当前 V1 暴露的是 Java/Spring Bean API，不包含：
 
 - HTTP 发布接口；
-- Outbox 查询接口；
-- DLQ 管理接口；
-- 人工重放接口；
 - 管理后台。
 
-这些属于后续管理平面功能，当前应通过数据库、RabbitMQ 管理台和应用日志排查。
+## 8. V1.1 新增能力
+
+### 8.1 注解式声明（推荐）
+
+用 `@OutboxEvent` + `@OutboxHandler` 替代手写 `EventDefinition` / `OutboxProSubscription` Bean，
+同一份 eventType 字符串从 4 处重复缩减为载荷类上的 1 处声明，写错在启动时快速失败：
+
+```java
+// 载荷类：声明事件类型与路由
+@OutboxEvent(eventType = "order.created", exchange = "order.exchange")
+public record OrderCreatedPayload(Long orderId) {
+}
+
+// Handler：声明队列订阅，只实现业务方法
+@Component
+@OutboxHandler(event = OrderCreatedPayload.class, queue = "inventory-service.queue",
+        consumerName = "inventory-service")   // 同一事件被多个消费方消费时必须声明
+public class OrderCreatedHandler extends AnnotatedOutboxHandler<OrderCreatedPayload> {
+
+    @Override
+    public void handle(EventContext<OrderCreatedPayload> context) {
+        // 只写业务逻辑；Inbox、ACK、重试、死信仍由框架处理
+    }
+}
+```
+
+说明：
+
+- 载荷类必须标注 `@OutboxEvent`，否则启动失败；
+- `@OutboxHandler` 的 `queue` 必填；同一队列上的多个 Handler 会合并为一个订阅；
+- `retry = @RetryPolicySpec(maxAttempts = 3, initialDelayMillis = 500, ...)` 可在事件级覆盖
+  全局 `outboxpro.retry`；所有字段保持默认时沿用全局配置；
+- 注解式与 Builder 式 Bean 可以共存，同一 eventType 冲突注册会在启动时抛出
+  `EventConfigurationException`。
+
+### 8.2 类型安全发布
+
+```java
+// 按 payload 类型反查事件类型，无需手写字符串
+publisher.publish(OrderCreatedPayload.class, new OrderCreatedPayload(orderId));
+
+// 带 extensions 的重载
+publisher.publish(OrderCreatedPayload.class, payload, Map.of("tenantId", tenantId));
+```
+
+载荷类型没有对应事件定义、或被多个事件定义共用时会抛出 `EventConfigurationException`；
+后者请改用 `publish(eventType, payload)` 消除歧义。
+
+### 8.3 @NonRetryable 异常标注
+
+Handler 抛出标注了 `@NonRetryable` 的异常（或因果链中包含）时，框架跳过重试直接进入死信流程，
+等价于抛出 `NonRetryableEventException`，但业务可以保留自定义异常类型：
+
+```java
+@NonRetryable
+public class InsufficientBalanceException extends RuntimeException { ... }
+```
+
+未标注异常的行为不变：默认重试，耗尽后进死信。
+
+### 8.4 运维查询端点（默认关闭）
+
+设置 `outboxpro.ops.enabled=true` 后暴露 `/actuator/outboxpro-ops`：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/outbox?status=DEAD&eventType=&page=0&size=20&operator=` | Outbox 分页检索（视图不含 payload） |
+| GET | `/outbox/{eventId}?operator=` | 单条详情（含 payload） |
+| POST | `/outbox/{eventId}/replay` | 生产端 DEAD 消息复位为 PENDING，交还 Relay 重投 |
+| GET | `/dlq?status=PENDING_REPLAY&eventType=&consumerName=&page=0&size=20&operator=` | 死信台账分页检索 |
+
+请求体：`{"operator": "ops-alice", "reason": "bug fixed"}`。
+
+安全边界：
+
+- 鉴权复用 `DlqReplayAuthorizer` SPI，检索与重放以固定 scope（`outbox:list` / `outbox:replay` /
+  `dlq:list`）作为 `eventId` 参数调用 `authorize(scope, operator)`，实现方按 scope 判权；
+- 未配置授权器时所有调用默认拒绝；
+- 端点默认关闭，列表响应不包含消息载荷，避免大响应与敏感数据外泄。

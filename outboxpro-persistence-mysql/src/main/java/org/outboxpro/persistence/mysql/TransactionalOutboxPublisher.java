@@ -38,6 +38,14 @@ public final class TransactionalOutboxPublisher implements OutboxProPublisher {
         repository.insert(new OutboxRecord(0, envelope.getEventId(), envelope.getEventType(), envelope.getSchemaVersion(), envelope.getProducer(), definition.getRoute().exchange(), definition.getRoute().routingKey(), serializer.serialize(envelope), envelope.getTraceId(), envelope.getCorrelationId(), envelope.getCausationId(), "PENDING", 0, null, null, null));
         return envelope;
     }
+
+    @Override public <T> EventEnvelope<T> publish(Class<T> payloadType, T payload) { return publish(payloadType, payload, Map.of()); }
+    @Override public <T> EventEnvelope<T> publish(Class<T> payloadType, T payload, Map<String, Object> extensions) {
+        if (payloadType == null) throw new IllegalArgumentException("payloadType must not be null");
+        // 类型安全发布：按载荷类型反查唯一事件定义，避免业务代码手写 eventType 字符串。
+        EventDefinition<?> definition = registry.requireByPayloadType(payloadType);
+        return publish(definition.getEventType(), payload, extensions);
+    }
 }
 
 
