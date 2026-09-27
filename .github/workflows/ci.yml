@@ -11,10 +11,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Set up JDK 17
+      # 项目 enforcer 要求 JDK [21,22)，与其他 starter 的 17 基线不同
+      - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
-          java-version: '17'
+          java-version: '21'
           distribution: 'temurin'
           cache: maven
       # 多模块全量编译打包；RabbitMQ/MySQL 集成测试需要外部服务，CI 只跑无依赖的 core/spi 单测
