@@ -1,5 +1,7 @@
 # OutboxPro
 
+[![Maven Central](https://img.shields.io/maven-central/v/io.github.biglv666/outboxpro-spring-boot-starter)](https://central.sonatype.com/artifact/io.github.biglv666/outboxpro-spring-boot-starter) [![CI](https://github.com/BIGLV666/OutboxPro/actions/workflows/ci.yml/badge.svg)](https://github.com/BIGLV666/OutboxPro/actions/workflows/ci.yml)
+
 OutboxPro 是面向 Spring Boot 的事务消息与 RabbitMQ 操作简化组件。V1 优先支持 **MySQL + RabbitMQ + Jackson + Spring JDBC**，目标是让业务方只负责声明事件和编写 Handler。
 
 ## 文档导航
