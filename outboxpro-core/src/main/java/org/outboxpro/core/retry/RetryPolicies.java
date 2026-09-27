@@ -19,11 +19,11 @@ public final class RetryPolicies {
      * 把注解声明解析为运行时重试策略。
      *
      * @param spec 注解声明
-     * @return 任一数值字段被显式设置时返回解析后的策略；全部保持哨兵值时返回 {@code null} 表示不覆盖，
+     * @return 关闭重试或任一数值字段被显式设置时返回解析后的策略；所有字段保持默认时返回 {@code null} 表示不覆盖，
      *         调用方应沿用默认策略
      */
     public static RetryPolicy fromSpec(RetryPolicySpec spec) {
-        boolean unset = spec.maxAttempts() == RetryPolicySpec.UNSET
+        boolean unset = spec.enabled() && spec.maxAttempts() == RetryPolicySpec.UNSET
                 && spec.initialDelayMillis() == RetryPolicySpec.UNSET
                 && spec.multiplier() == RetryPolicySpec.UNSET
                 && spec.maxDelayMillis() == RetryPolicySpec.UNSET;

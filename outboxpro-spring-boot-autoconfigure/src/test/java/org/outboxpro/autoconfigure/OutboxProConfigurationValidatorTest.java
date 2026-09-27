@@ -134,4 +134,60 @@ class OutboxProConfigurationValidatorTest {
         assertThatThrownBy(() -> new RetryPolicy(true, 0, Duration.ofSeconds(1), 2, Duration.ofMinutes(5)))
                 .isInstanceOf(IllegalArgumentException.class);
     }
+
+    /** redelivery-delay 允许为 0，但不允许为负或超过 60s。 */
+    @Test
+    void redeliveryDelayBounds() {
+        OutboxProProperties properties = validProperties();
+        properties.getConsumer().setRedeliveryDelay(Duration.ofSeconds(90));
+        assertThatThrownBy(() -> new OutboxProConfigurationValidator(properties))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("outboxpro.consumer.redelivery-delay");
+        properties.getConsumer().setRedeliveryDelay(Duration.ofMillis(-1));
+        assertThatThrownBy(() -> new OutboxProConfigurationValidator(properties))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("outboxpro.consumer.redelivery-delay");
+        properties.getConsumer().setRedeliveryDelay(Duration.ZERO);
+        assertThatCode(() -> new OutboxProConfigurationValidator(properties)).doesNotThrowAnyException();
+    }
+
+    /** RECEIVED 孤儿重开超时过小会在并发执行期间互相重开，必须拒绝。 */
+    @Test
+    void inboxReceivedStaleTimeoutMustBeAtLeastOneMinute() {
+        OutboxProProperties properties = validProperties();
+        properties.getConsumer().setInboxReceivedStaleTimeout(Duration.ofSeconds(30));
+        assertThatThrownBy(() -> new OutboxProConfigurationValidator(properties))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("outboxpro.consumer.inbox-received-stale-timeout");
+    }
+
+    /** Retry Queue 总量上限必须为正数。 */
+    @Test
+    void maxRetryQueueCountMustBePositive() {
+        OutboxProProperties properties = validProperties();
+        properties.getConsumer().setMaxRetryQueueCount(0);
+        assertThatThrownBy(() -> new OutboxProConfigurationValidator(properties))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("outboxpro.consumer.max-retry-queue-count");
+    }
+
+    /** 保留策略各时长必须为正，批大小与单轮上限必须为正。 */
+    @Test
+    void retentionConfigurationBounds() {
+        OutboxProProperties zeroSent = validProperties();
+        zeroSent.getRetention().setOutboxSent(Duration.ZERO);
+        assertThatThrownBy(() -> new OutboxProConfigurationValidator(zeroSent))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("outboxpro.retention.outbox-sent");
+
+        OutboxProProperties zeroBatch = validProperties();
+        zeroBatch.getRetention().setBatchSize(0);
+        assertThatThrownBy(() -> new OutboxProConfigurationValidator(zeroBatch))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("outboxpro.retention.batch-size");
+
+        OutboxProProperties disabled = validProperties();
+        disabled.getRetention().setEnabled(false);
+        assertThatCode(() -> new OutboxProConfigurationValidator(disabled)).doesNotThrowAnyException();
+    }
 }

@@ -28,7 +28,8 @@ public @interface RetryPolicySpec {
     boolean enabled() default true;
 
     /**
-     * @return 最大消费尝试次数；{@code -1} 表示未设置
+     * @return 最大消费尝试次数（包含首次消费，至少为 1）；1 表示失败后不再重试，
+     *         {@code -1} 表示未设置，关闭重试推荐使用 {@code enabled=false}
      */
     int maxAttempts() default -1;
 

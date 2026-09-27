@@ -406,11 +406,14 @@ public class OrderCreatedHandler extends AnnotatedOutboxHandler<OrderCreatedPayl
 说明：
 
 - 载荷类必须标注 `@OutboxEvent`，否则启动失败；
-- `@OutboxHandler` 的 `queue` 必填；同一队列上的多个 Handler 会合并为一个订阅；
+- `@OutboxHandler` 的 `queue` 必填；交换机、队列和消费者名称均相同的 Handler 会合并为一个订阅；
+- 不同分组生成同名订阅时启动快速失败，不会覆盖绑定。订阅名继续使用 `annotated-{queue}[-{consumerName}]`；
+- `retry = @RetryPolicySpec(enabled = false)` 可单独关闭该绑定的重试，失败消息直接进入死信流程。
+- `maxAttempts` 包含首次消费，必须至少为 `1`；设为 `1` 时失败后不再重试，`0` 是非法配置。
 - `retry = @RetryPolicySpec(maxAttempts = 3, initialDelayMillis = 500, ...)` 可在事件级覆盖
   全局 `outboxpro.retry`；所有字段保持默认时沿用全局配置；
-- 注解式与 Builder 式 Bean 可以共存，同一 eventType 冲突注册会在启动时抛出
-  `EventConfigurationException`。
+- 注解式与 Builder 式 Bean 可以共存；同一 eventType 的 payloadType、exchange、routingKey 和 schemaVersion 必须一致，
+  否则在启动时抛出 `EventConfigurationException`。
 
 ### 8.2 类型安全发布
 

@@ -10,6 +10,7 @@ import org.outboxpro.core.handler.OutboxProHandler;
 import org.outboxpro.core.retry.RetryPolicy;
 import org.outboxpro.core.subscription.EventBinding;
 import org.outboxpro.core.subscription.OutboxProSubscription;
+import org.springframework.aop.framework.AopProxyUtils;
 import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
 
 import java.util.ArrayList;
@@ -71,18 +72,26 @@ public final class AnnotationDrivenOutboxRegistrar {
                         + " is already registered with payload type " + existing.getPayloadType().getName()
                         + ", but handler " + spec.handler().getClass().getName()
                         + " declares " + spec.payloadType().getName());
+            } else if (!existing.getRoute().exchange().equals(event.exchange())
+                    || !existing.getRoute().routingKey().equals(resolveRoutingKey(event))
+                    || !existing.getSchemaVersion().equals(event.schemaVersion())) {
+                throw new EventConfigurationException("Event type " + event.eventType()
+                        + " has conflicting route or schemaVersion between EventDefinition and @OutboxEvent: existing="
+                        + existing.getRoute() + "/" + existing.getSchemaVersion()
+                        + ", annotated=" + event.exchange() + "/" + resolveRoutingKey(event)
+                        + "/" + event.schemaVersion());
             }
         }
     }
 
     /** 按「交换机 + 队列 + 消费者名称」分组构建注解式订阅。 */
     private Map<String, OutboxProSubscription> buildSubscriptions(List<OutboxProHandler<?>> handlers) {
-        Map<String, List<AnnotatedSpec>> groups = new LinkedHashMap<>();
+        Map<SubscriptionGroup, List<AnnotatedSpec>> groups = new LinkedHashMap<>();
         for (AnnotatedSpec spec : collectSpecs(handlers)) {
             OutboxHandler annotation = spec.annotation();
             String exchange = annotation.exchange().isBlank()
                     ? spec.eventAnnotation().exchange() : annotation.exchange();
-            String groupKey = exchange + "|" + annotation.queue() + "|" + annotation.consumerName();
+            SubscriptionGroup groupKey = new SubscriptionGroup(exchange, annotation.queue(), annotation.consumerName());
             groups.computeIfAbsent(groupKey, ignored -> new ArrayList<>()).add(spec);
         }
 
@@ -106,7 +115,10 @@ public final class AnnotationDrivenOutboxRegistrar {
             if (!first.consumerName().isBlank()) {
                 builder.consumerName(first.consumerName());
             }
-            subscriptions.put(subscriptionName, builder.build());
+            if (subscriptions.putIfAbsent(subscriptionName, builder.build()) != null) {
+                throw new EventConfigurationException("Duplicate annotated subscription name: " + subscriptionName
+                        + "; use distinct queue/consumerName values for different subscription groups");
+            }
         }
         return subscriptions;
     }
@@ -115,7 +127,7 @@ public final class AnnotationDrivenOutboxRegistrar {
     private List<AnnotatedSpec> collectSpecs(List<OutboxProHandler<?>> handlers) {
         List<AnnotatedSpec> specs = new ArrayList<>();
         for (OutboxProHandler<?> handler : handlers) {
-            Class<?> handlerType = unwrapProxy(handler.getClass());
+            Class<?> handlerType = AopProxyUtils.ultimateTargetClass(handler);
             OutboxHandler annotation = handlerType.getAnnotation(OutboxHandler.class);
             if (annotation == null) {
                 continue;
@@ -149,13 +161,8 @@ public final class AnnotationDrivenOutboxRegistrar {
         return event.routingKey().isBlank() ? event.eventType() : event.routingKey();
     }
 
-    /** 去除 Spring CGLIB 代理外壳，确保能读取到业务类上的注解。 */
-    private Class<?> unwrapProxy(Class<?> type) {
-        while (type != null && type.getName().contains("$$")) {
-            type = type.getSuperclass();
-        }
-        return type;
-    }
+    /** 结构化分组键，避免交换机、队列或消费者名称含分隔符时发生碰撞。 */
+    private record SubscriptionGroup(String exchange, String queue, String consumerName) { }
 
     /** 单个注解式 Handler 的解析结果。 */
     private record AnnotatedSpec(OutboxProHandler<?> handler, OutboxHandler annotation,

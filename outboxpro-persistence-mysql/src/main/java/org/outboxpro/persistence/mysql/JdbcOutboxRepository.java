@@ -129,6 +129,60 @@ public class JdbcOutboxRepository implements OutboxRepository {
     }
 
     /**
+     * 租约校验下的 SENT 迁移：返回影响行数，让 Relay 感知"租约已被其他实例复位"的竞态。
+     */
+    @Override
+    public boolean transitionToSent(long id, String owner, Instant sentAt) {
+        return jdbc.update("""
+                UPDATE outboxpro_outbox
+                SET status = 'SENT', sent_time = ?, updated_time = NOW(),
+                    claim_owner = NULL, claimed_time = NULL, version = version + 1
+                WHERE id = ? AND status = 'PROCESSING' AND claim_owner = ?
+                """, Timestamp.from(sentAt), id, owner) == 1;
+    }
+
+    /**
+     * 租约校验下的 RETRY_WAITING 迁移：返回影响行数，语义同 {@link #transitionToSent(long, String, Instant)}。
+     */
+    @Override
+    public boolean transitionToRetryWaiting(long id, String owner, int attempt, Instant nextRetryAt,
+                                            String errorType, String errorMessage) {
+        return jdbc.update("""
+                UPDATE outboxpro_outbox
+                SET status = 'RETRY_WAITING', attempt_count = ?, next_retry_time = ?,
+                    last_error_type = ?, last_error_message = ?, updated_time = NOW(),
+                    claim_owner = NULL, claimed_time = NULL, version = version + 1
+                WHERE id = ? AND status = 'PROCESSING' AND claim_owner = ?
+                """, attempt, Timestamp.from(nextRetryAt), errorType, truncate(errorMessage), id, owner) == 1;
+    }
+
+    /**
+     * 租约校验下的 DEAD 迁移：返回影响行数，语义同 {@link #transitionToSent(long, String, Instant)}。
+     */
+    @Override
+    public boolean transitionToDead(long id, String owner, int attempt, String errorType, String errorMessage) {
+        return jdbc.update("""
+                UPDATE outboxpro_outbox
+                SET status = 'DEAD', attempt_count = ?, last_error_type = ?, last_error_message = ?,
+                    updated_time = NOW(), claim_owner = NULL, claimed_time = NULL, version = version + 1
+                WHERE id = ? AND status = 'PROCESSING' AND claim_owner = ?
+                """, attempt, errorType, truncate(errorMessage), id, owner) == 1;
+    }
+
+    /**
+     * 分批清理已投递成功的记录：只清理 SENT 终态，且按主键序限量删除，避免长事务锁表。
+     */
+    @Override
+    public int purgeSentBefore(Instant cutoff, int limit) {
+        return jdbc.update("""
+                DELETE FROM outboxpro_outbox
+                WHERE status = 'SENT' AND sent_time < ?
+                ORDER BY id
+                LIMIT ?
+                """, Timestamp.from(cutoff), limit);
+    }
+
+    /**
      * 将可重试的投递失败记录释放租约，并安排下次 Relay 重试。
      *
      * @param id Outbox 主键

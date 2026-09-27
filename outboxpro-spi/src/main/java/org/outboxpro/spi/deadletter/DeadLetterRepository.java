@@ -139,4 +139,18 @@ public interface DeadLetterRepository {
     default long countDeadLetters(DeadLetterQuery query) {
         return 0L;
     }
+
+    /**
+     * 清理指定时间之前已成功重放（REPLAYED）的死信记录，供内置保留策略使用。
+     * 仅允许清理 REPLAYED 状态：PENDING_REPLAY / REPLAYING / DISPATCHING 记录
+     * 是分派租约与重放预算的状态机依据，不属于保留范围。清理不涉及待重放计数桶。
+     * 实现应限制单次删除行数，避免长事务锁表。
+     *
+     * @param cutoff 清理该时间之前重放成功的记录
+     * @param limit 单次最多删除行数
+     * @return 实际删除行数；实现不支持时返回 0
+     */
+    default int purgeReplayedBefore(Instant cutoff, int limit) {
+        return 0;
+    }
 }

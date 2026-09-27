@@ -43,6 +43,9 @@ import static org.assertj.core.api.Assertions.assertThat;
         properties = {
                 "outboxpro.producer.poll-interval=200ms",
                 "outboxpro.consumer.concurrency=1",
+                "outboxpro.retry.enabled=true",
+                "outboxpro.retry.max-attempts=3",
+                "outboxpro.retry.initial-delay=200ms",
                 "outboxpro.dlq.alert.enabled=false"
         })
 class AnnotationDrivenIntegrationTest extends AbstractOutboxProIntegrationTest {
@@ -71,6 +74,39 @@ class AnnotationDrivenIntegrationTest extends AbstractOutboxProIntegrationTest {
         }
     }
 
+    @OutboxEvent(eventType = "it.anno.disabled", exchange = "it.anno.disabled.exchange")
+    record DisabledPayload(long id) { }
+
+    @OutboxHandler(event = DisabledPayload.class, queue = "it.anno.disabled.queue",
+            consumerName = "it-anno-disabled", retry = @org.outboxpro.core.annotation.RetryPolicySpec(enabled = false))
+    static class DisabledHandler extends AnnotatedOutboxHandler<DisabledPayload> {
+        static final java.util.concurrent.atomic.AtomicInteger INVOCATIONS = new java.util.concurrent.atomic.AtomicInteger();
+        @Override public void handle(EventContext<DisabledPayload> context) {
+            INVOCATIONS.incrementAndGet();
+            throw new IllegalStateException("ordinary retryable failure");
+        }
+    }
+
+    @Autowired
+    org.springframework.jdbc.core.JdbcTemplate jdbc;
+
+    /** 仅设置 enabled=false 时，普通异常也只能消费一次并直接记入死信台账。 */
+    @Test
+    void disabledOnlyRetrySkipsGlobalRetryAndGoesToDeadLetter() {
+        DisabledHandler.INVOCATIONS.set(0);
+        var envelope = publisher.publish(DisabledPayload.class, new DisabledPayload(9201));
+        Awaitility.await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> {
+            var rows = jdbc.queryForList("SELECT reason_code, attempt_count FROM outboxpro_dead_letter "
+                    + "WHERE event_id = ? AND consumer_name = ?", envelope.getEventId(), "it-anno-disabled");
+            assertThat(rows).singleElement().satisfies(row -> {
+                assertThat(row.get("reason_code")).isEqualTo("HANDLER_FAILURE");
+                assertThat(row.get("attempt_count")).isEqualTo(1);
+            });
+        });
+        Awaitility.await().during(Duration.ofSeconds(2)).atMost(Duration.ofSeconds(4))
+                .untilAsserted(() -> assertThat(DisabledHandler.INVOCATIONS.get()).isEqualTo(1));
+    }
+
     @Autowired
     OutboxProPublisher publisher;
 
@@ -83,9 +119,20 @@ class AnnotationDrivenIntegrationTest extends AbstractOutboxProIntegrationTest {
     @Autowired
     List<OutboxProSubscription> subscriptions;
 
-    /** 测试专用配置：只注册注解式 Handler 实例，不声明任何定义/订阅 Bean。 */
+    /** 测试专用配置：注册注解式 Handler，并以一致的 Builder 定义验证共存。 */
     @Configuration
     static class Config {
+
+        @Bean
+        DisabledHandler disabledHandler() { return new DisabledHandler(); }
+
+        /** 同一事件的 Builder 与注解声明在真实 Spring 上下文中共存。 */
+        @Bean
+        org.outboxpro.core.event.EventDefinition<AnnotatedOrderPayload> annotatedDefinition() {
+            return org.outboxpro.core.event.EventDefinition.<AnnotatedOrderPayload>builder()
+                    .eventType("it.anno.order.created").payloadType(AnnotatedOrderPayload.class)
+                    .route("it.anno.exchange", "it.anno.order.created").build();
+        }
 
         @Bean
         AnnotatedOrderHandler annotatedOrderHandler() {

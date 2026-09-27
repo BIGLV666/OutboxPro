@@ -33,6 +33,68 @@ public interface OutboxRepository {
     int recoverExpiredClaims(Instant now);
 
     /**
+     * 在租约校验下把已确认消息迁移到 SENT，并报告状态迁移是否真正生效。
+     *
+     * <p>认领租约可能被其他实例的过期恢复复位（此时 {@code claim_owner} 已被清空），
+     * 调用方需要通过返回值感知"发布成功但状态未迁移"的竞态，以便告警。
+     * 默认实现调用 {@link #markSent(long, String, Instant)} 并返回 {@code true}，
+     * 保持既有自定义实现的二进制兼容；能拿到影响行数的实现应覆写本方法。</p>
+     *
+     * @param id Outbox 主键
+     * @param owner 当前实例标识
+     * @param sentAt 发布确认时间
+     * @return 状态确实迁移到 SENT 时返回 {@code true}；租约已丢失返回 {@code false}
+     */
+    default boolean transitionToSent(long id, String owner, Instant sentAt) {
+        markSent(id, owner, sentAt);
+        return true;
+    }
+
+    /**
+     * 在租约校验下把发布失败的消息迁移到 RETRY_WAITING，语义同 {@link #transitionToSent(long, String, Instant)}。
+     *
+     * @param id Outbox 主键
+     * @param owner 当前实例标识
+     * @param attempt 当前尝试次数
+     * @param nextRetryAt 下次重试时间
+     * @param errorType 错误类型
+     * @param errorMessage 脱敏后的错误信息
+     * @return 状态确实迁移时返回 {@code true}；租约已丢失返回 {@code false}
+     */
+    default boolean transitionToRetryWaiting(long id, String owner, int attempt, Instant nextRetryAt,
+                                             String errorType, String errorMessage) {
+        markRetryWaiting(id, owner, attempt, nextRetryAt, errorType, errorMessage);
+        return true;
+    }
+
+    /**
+     * 在租约校验下把发布失败的消息迁移到 DEAD，语义同 {@link #transitionToSent(long, String, Instant)}。
+     *
+     * @param id Outbox 主键
+     * @param owner 当前实例标识
+     * @param attempt 最终尝试次数
+     * @param errorType 错误类型
+     * @param errorMessage 脱敏后的错误信息
+     * @return 状态确实迁移时返回 {@code true}；租约已丢失返回 {@code false}
+     */
+    default boolean transitionToDead(long id, String owner, int attempt, String errorType, String errorMessage) {
+        markDead(id, owner, attempt, errorType, errorMessage);
+        return true;
+    }
+
+    /**
+     * 清理指定时间之前已投递成功（SENT）的 Outbox 记录，供内置保留策略使用。
+     * 实现应限制单次删除行数，避免长事务锁表。
+     *
+     * @param cutoff 清理该时间之前投递成功的记录
+     * @param limit 单次最多删除行数
+     * @return 实际删除行数；实现不支持时返回 0
+     */
+    default int purgeSentBefore(Instant cutoff, int limit) {
+        return 0;
+    }
+
+    /**
      * 按条件分页检索 Outbox 消息，供运维查询使用。
      * 返回按 id 倒序排列，条件字段全部精确匹配。
      *

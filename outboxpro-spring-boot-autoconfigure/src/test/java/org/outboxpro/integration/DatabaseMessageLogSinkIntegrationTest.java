@@ -155,7 +155,7 @@ class DatabaseMessageLogSinkIntegrationTest extends AbstractOutboxProIntegration
         Awaitility.await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> {
             List<Map<String, Object>> rows = jdbc.queryForList(
                     "SELECT status, trace_id, consumer, queue_name, stage FROM outboxpro_message_log "
-                            + "WHERE event_id = ? AND event_type = ?",
+                            + "WHERE event_id = ? AND event_type = ? AND stage = 'HANDLER'",
                     eventId, EVENT_TYPE);
             assertThat(rows).as("消费日志应异步批量落库").isNotEmpty();
             Map<String, Object> row = rows.get(0);

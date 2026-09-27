@@ -2,7 +2,9 @@ package org.outboxpro.core.event;
 
 import org.outboxpro.core.exception.EventConfigurationException;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -10,7 +12,11 @@ import java.util.Map;
  * 注册表拒绝重复 eventType，避免不同 Bean 对同一事件产生不确定路由。
  */
 public final class EventRegistry {
-    private final Map<String, EventDefinition<?>> definitions = new LinkedHashMap<>();
+    /** 注册时复制、一次性发布两个索引，读取不加锁且不会观察到半更新状态。 */
+    private volatile Snapshot snapshot = new Snapshot(Map.of(), Map.of());
+
+    private record Snapshot(Map<String, EventDefinition<?>> definitions,
+                            Map<Class<?>, List<EventDefinition<?>>> byPayloadType) { }
 
     /**
      * 注册事件定义并拒绝重复 eventType。
@@ -19,8 +25,17 @@ public final class EventRegistry {
      * @throws EventConfigurationException eventType 已经注册时抛出
      */
     public synchronized void register(EventDefinition<?> definition) {
-        EventDefinition<?> previous = definitions.putIfAbsent(definition.getEventType(), definition);
-        if (previous != null) throw new EventConfigurationException("Duplicate event definition: " + definition.getEventType());
+        Snapshot current = snapshot;
+        if (current.definitions().containsKey(definition.getEventType())) {
+            throw new EventConfigurationException("Duplicate event definition: " + definition.getEventType());
+        }
+        Map<String, EventDefinition<?>> definitions = new LinkedHashMap<>(current.definitions());
+        definitions.put(definition.getEventType(), definition);
+        Map<Class<?>, List<EventDefinition<?>>> byPayload = new LinkedHashMap<>(current.byPayloadType());
+        var matches = new ArrayList<>(byPayload.getOrDefault(definition.getPayloadType(), List.of()));
+        matches.add(definition);
+        byPayload.put(definition.getPayloadType(), List.copyOf(matches));
+        snapshot = new Snapshot(Map.copyOf(definitions), Map.copyOf(byPayload));
     }
 
     /**
@@ -31,7 +46,7 @@ public final class EventRegistry {
      * @throws EventConfigurationException 事件未注册时抛出
      */
     public EventDefinition<?> require(String eventType) {
-        EventDefinition<?> definition = definitions.get(eventType);
+        EventDefinition<?> definition = snapshot.definitions().get(eventType);
         if (definition == null) throw new EventConfigurationException("Event is not registered: " + eventType);
         return definition;
     }
@@ -44,7 +59,7 @@ public final class EventRegistry {
      * @return 已注册定义；未注册时为 {@code null}
      */
     public EventDefinition<?> find(String eventType) {
-        return definitions.get(eventType);
+        return snapshot.definitions().get(eventType);
     }
 
     /**
@@ -56,24 +71,19 @@ public final class EventRegistry {
      *         多个定义时业务方必须改用 eventType 字符串重载消除歧义
      */
     public EventDefinition<?> requireByPayloadType(Class<?> payloadType) {
-        EventDefinition<?> matched = null;
-        for (EventDefinition<?> definition : definitions.values()) {
-            if (definition.getPayloadType().equals(payloadType)) {
-                if (matched != null) {
-                    throw new EventConfigurationException(
-                            "Payload type " + payloadType.getName() + " is registered for multiple events: "
-                                    + matched.getEventType() + ", " + definition.getEventType()
-                                    + "; use publish(eventType, payload) instead");
-                }
-                matched = definition;
-            }
-        }
-        if (matched == null) {
+        var matches = snapshot.byPayloadType().get(payloadType);
+        if (matches == null) {
             throw new EventConfigurationException("No event registered for payload type " + payloadType.getName());
         }
-        return matched;
+        if (matches.size() > 1) {
+            throw new EventConfigurationException(
+                    "Payload type " + payloadType.getName() + " is registered for multiple events: "
+                            + matches.get(0).getEventType() + ", " + matches.get(1).getEventType()
+                            + "; use publish(eventType, payload) instead");
+        }
+        return matches.get(0);
     }
 
     /** @return 当前注册表的不可变快照。 */
-    public Map<String, EventDefinition<?>> definitions() { return Map.copyOf(definitions); }
+    public Map<String, EventDefinition<?>> definitions() { return snapshot.definitions(); }
 }

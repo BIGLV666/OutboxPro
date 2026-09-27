@@ -107,6 +107,7 @@ public class OutboxProAutoConfiguration {
      */
     @Bean
     @ConditionalOnMissingBean
+    @DependsOn("outboxProEventRegistryInitializer")
     AnnotationDrivenOutboxRegistrar outboxProAnnotationDrivenRegistrar(
             EventRegistry registry, ObjectProvider<OutboxProHandler<?>> handlers,
             ConfigurableListableBeanFactory beanFactory) {
@@ -165,8 +166,8 @@ public class OutboxProAutoConfiguration {
     @ConditionalOnClass(JdbcTemplate.class)
     @ConditionalOnBean(DataSource.class)
     @ConditionalOnMissingBean
-    InboxRepository outboxProInboxRepository(JdbcTemplate jdbcTemplate) {
-        return new JdbcInboxRepository(jdbcTemplate);
+    InboxRepository outboxProInboxRepository(JdbcTemplate jdbcTemplate, OutboxProProperties properties) {
+        return new JdbcInboxRepository(jdbcTemplate, properties.getConsumer().getInboxReceivedStaleTimeout());
     }
 
     /**
@@ -185,6 +186,7 @@ public class OutboxProAutoConfiguration {
     /**
      * 死信协调器。
      * 根据配置模式执行框架 RabbitMQ DLQ 发布或调用用户自定义策略。
+     * Confirm 超时与生产端 confirm-timeout 使用同一配置。
      */
     @Bean
     @ConditionalOnBean(RabbitTemplate.class)
@@ -202,7 +204,8 @@ public class OutboxProAutoConfiguration {
                 deadLetterStrategy.getIfAvailable(),
                 deadLetterNotifier.getIfAvailable(),
                 rabbitTemplate,
-                dlq.getLedger().isEnabled()
+                dlq.getLedger().isEnabled(),
+                properties.getProducer().getConfirmTimeout().toMillis()
         );
     }
 
@@ -240,6 +243,24 @@ public class OutboxProAutoConfiguration {
     }
 
     /**
+     * 历史数据保留任务：周期性清理 Outbox SENT、Inbox SUCCESS、消息日志与死信台账 REPLAYED，
+     * 防止三张框架表和台账无限增长。定时调度可通过 outboxpro.retention.enabled=false 关闭，
+     * 手动清理端点（/actuator/outboxpro-ops/retention/purge）始终可用同一逻辑按需执行。
+     */
+    @Bean
+    @ConditionalOnBean({DataSource.class, OutboxRepository.class, InboxRepository.class})
+    @ConditionalOnMissingBean
+    RetentionTask outboxProRetentionTask(
+            OutboxRepository outboxRepository,
+            InboxRepository inboxRepository,
+            ObjectProvider<DeadLetterRepository> deadLetterRepository,
+            JdbcTemplate jdbcTemplate,
+            OutboxProProperties properties) {
+        return new RetentionTask(outboxRepository, inboxRepository,
+                deadLetterRepository.getIfAvailable(), jdbcTemplate, properties.getRetention());
+    }
+
+    /**
      * 死信重放端点。
      * 只有在台账和重放都启用时才装配。启动时强校验配置依赖。
      * 需要 Spring Boot Actuator 依赖存在。
@@ -270,13 +291,19 @@ public class OutboxProAutoConfiguration {
                 rabbitTemplate,
                 objectMapper,
                 properties.getDlq().getLedger().getMaxReplayCount(),
-                ownerId
+                ownerId,
+                properties.getProducer().getConfirmTimeout().toMillis()
         );
     }
 
     /**
      * 为 Reliable 消费提供本地数据库事务模板。
      * Handler 业务更新和 Inbox SUCCESS 必须使用同一个事务模板。
+     *
+     * <p>契约：通过注册同名 Bean 替换本模板时，必须是 DataSource 事务管理器支撑的
+     * {@link TransactionTemplate}，且保持默认 {@code PROPAGATION_REQUIRED} 与默认隔离级别；
+     * 改为 JPA 事务管理器或非 REQUIRED 传播会破坏"Handler 与 Inbox SUCCESS 同事务提交"
+     * 的 Reliable 语义，框架无法在运行期校验，务必理解该约束后再覆盖。</p>
      */
     @Bean
     @ConditionalOnBean(DataSource.class)
@@ -312,23 +339,26 @@ public class OutboxProAutoConfiguration {
         return new TransactionalOutboxPublisher(registry, serializer, repository, producerName);
     }
 
-    /** 创建 Relay；它由调度器周期触发并在事务外完成 RabbitMQ 发布。 */
+    /** 创建 Relay；它由专用调度线程周期触发并在事务外完成 RabbitMQ 发布。 */
     @Bean
     @ConditionalOnBean({OutboxRepository.class, MessagePublisher.class})
-    @ConditionalOnProperty(prefix = "outboxpro.producer", name = "relay-enabled", havingValue = "true", matchIfMissing = true)
+    @ConditionalOnProperty(prefix = "outboxpro.producer", name = {"enabled", "relay-enabled"},
+            havingValue = "true", matchIfMissing = true)
     OutboxRelay outboxProRelay(OutboxRepository repository, MessagePublisher publisher,
                                RetryPolicy policy, OutboxProProperties properties,
-                               ObjectProvider<OutboxMetrics> metrics) {
+                               ObjectProvider<OutboxMetrics> metrics,
+                               ObjectProvider<MessageLogSink> logSink) {
         return new OutboxRelay(repository, publisher, policy,
                 properties.getProducer().getBatchSize(), properties.getProducer().getClaimTimeout(),
-                metrics.getIfAvailable(() -> OutboxMetrics.NOOP));
+                metrics.getIfAvailable(() -> OutboxMetrics.NOOP), logSink.getIfAvailable());
     }
 
-    /** 将 OutboxRelay 挂接到 Spring 调度器。 */
-    @Bean
+    /** 将 OutboxRelay 挂接到框架自有调度线程，与宿主应用的 Spring 调度器隔离。 */
+    @Bean(initMethod = "start", destroyMethod = "stop")
     @ConditionalOnBean(OutboxRelay.class)
-    OutboxRelayScheduler outboxProRelayScheduler(OutboxRelay relay) {
-        return new OutboxRelayScheduler(relay);
+    @ConditionalOnProperty(prefix = "outboxpro.producer", name = "enabled", havingValue = "true", matchIfMissing = true)
+    OutboxRelayScheduler outboxProRelayScheduler(OutboxRelay relay, OutboxProProperties properties) {
+        return new OutboxRelayScheduler(relay, properties.getProducer().getPollInterval());
     }
 
     /** 默认使用 SLF4J 输出消息生命周期日志；日志失败必须被隔离。 */
@@ -376,14 +406,16 @@ public class OutboxProAutoConfiguration {
 
     /**
      * 在启动 Consumer 前声明拓扑，避免 Listener 先启动导致 Queue 不存在或 Binding 未完成。
-     * 依赖注解式注册器先完成订阅单例注册。
+     * 依赖注解式注册器先完成订阅单例注册。声明前校验 Retry Queue 总量上限。
      */
     @Bean(initMethod = "initialize")
     @DependsOn({"outboxProEventRegistryInitializer", "outboxProAnnotationDrivenRegistrar"})
     @ConditionalOnBean(TopologyManager.class)
     SubscriptionTopologyInitializer outboxProSubscriptionTopologyInitializer(
-            TopologyManager manager, ObjectProvider<OutboxProSubscription> subscriptions) {
-        return new SubscriptionTopologyInitializer(manager, subscriptions.orderedStream().toList());
+            TopologyManager manager, ObjectProvider<OutboxProSubscription> subscriptions,
+            OutboxProProperties properties) {
+        return new SubscriptionTopologyInitializer(manager, subscriptions.orderedStream().toList(),
+                properties.getConsumer().getMaxRetryQueueCount());
     }
 
     /**
@@ -404,7 +436,8 @@ public class OutboxProAutoConfiguration {
         return new RabbitConsumerManager(factory, template, objectMapper, inbox, transactionTemplate,
                 subscriptions.orderedStream().toList(), handlers.orderedStream().toList(), logSink,
                 deadLetterCoordinator, metrics.getIfAvailable(() -> OutboxMetrics.NOOP),
-                properties.getConsumer().getConcurrency(), properties.getConsumer().getPrefetch());
+                properties.getConsumer().getConcurrency(), properties.getConsumer().getPrefetch(),
+                properties.getProducer().getConfirmTimeout(), properties.getConsumer().getRedeliveryDelay());
     }
 
     /**
@@ -422,11 +455,13 @@ public class OutboxProAutoConfiguration {
     OutboxOpsEndpoint outboxProOpsEndpoint(
             OutboxRepository outboxRepository,
             DeadLetterRepository deadLetterRepository,
-            ObjectProvider<DlqReplayAuthorizer> authorizer) {
+            ObjectProvider<DlqReplayAuthorizer> authorizer,
+            ObjectProvider<RetentionTask> retentionTask) {
         DlqReplayAuthorizer defaultDeny = (scope, operator) -> {
             throw new SecurityException("No DlqReplayAuthorizer bean is configured for ops scope " + scope);
         };
-        return new OutboxOpsEndpoint(outboxRepository, deadLetterRepository, authorizer.getIfAvailable(() -> defaultDeny));
+        return new OutboxOpsEndpoint(outboxRepository, deadLetterRepository,
+                authorizer.getIfAvailable(() -> defaultDeny), retentionTask);
     }
 }
 

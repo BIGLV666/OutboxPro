@@ -28,7 +28,7 @@ import java.util.concurrent.TimeUnit;
  */
 @RestControllerEndpoint(id = "outboxpro")
 public final class DeadLetterReplayEndpoint {
-    private static final long REPUBLISH_CONFIRM_TIMEOUT_SECONDS = 10;
+    private static final long DEFAULT_CONFIRM_TIMEOUT_MILLIS = 10_000;
     private static final int MAX_EVENT_ID_LENGTH = 100;
     private static final int MAX_OPERATOR_LENGTH = 200;
     private static final int MAX_REASON_LENGTH = 1000;
@@ -39,9 +39,11 @@ public final class DeadLetterReplayEndpoint {
     private final ObjectMapper objectMapper;
     private final int maxReplayCount;
     private final String ownerId;
+    /** 重放消息等待 Publisher Confirm 的超时，与生产端 confirm-timeout 使用同一配置。 */
+    private final long confirmTimeoutMillis;
 
     /**
-     * 创建死信重放端点。
+     * 创建死信重放端点（Confirm 超时使用默认 10 秒）。
      *
      * @param deadLetterRepository 死信台账仓储
      * @param authorizer 重放授权器
@@ -56,12 +58,29 @@ public final class DeadLetterReplayEndpoint {
                                     ObjectMapper objectMapper,
                                     int maxReplayCount,
                                     String ownerId) {
+        this(deadLetterRepository, authorizer, rabbitTemplate, objectMapper, maxReplayCount, ownerId,
+                DEFAULT_CONFIRM_TIMEOUT_MILLIS);
+    }
+
+    /**
+     * 创建死信重放端点。
+     *
+     * @param confirmTimeoutMillis 重放消息等待 Publisher Confirm 的超时毫秒数
+     */
+    public DeadLetterReplayEndpoint(DeadLetterRepository deadLetterRepository,
+                                    DlqReplayAuthorizer authorizer,
+                                    RabbitTemplate rabbitTemplate,
+                                    ObjectMapper objectMapper,
+                                    int maxReplayCount,
+                                    String ownerId,
+                                    long confirmTimeoutMillis) {
         this.deadLetterRepository = deadLetterRepository;
         this.authorizer = authorizer;
         this.rabbitTemplate = rabbitTemplate;
         this.objectMapper = objectMapper;
         this.maxReplayCount = maxReplayCount;
         this.ownerId = ownerId;
+        this.confirmTimeoutMillis = confirmTimeoutMillis <= 0 ? DEFAULT_CONFIRM_TIMEOUT_MILLIS : confirmTimeoutMillis;
     }
 
     /**
@@ -103,7 +122,7 @@ public final class DeadLetterReplayEndpoint {
                         }, correlation);
 
                 // 只有目标端 Publisher Confirm 成功后，才把台账标记为 REPLAYED。
-                if (correlation.getFuture().get(REPUBLISH_CONFIRM_TIMEOUT_SECONDS, TimeUnit.SECONDS).isAck()) {
+                if (correlation.getFuture().get(confirmTimeoutMillis, TimeUnit.MILLISECONDS).isAck()) {
                     deadLetterRepository.markReplaySucceeded(record.id(), ownerId, Instant.now());
                     succeeded++;
                 } else {

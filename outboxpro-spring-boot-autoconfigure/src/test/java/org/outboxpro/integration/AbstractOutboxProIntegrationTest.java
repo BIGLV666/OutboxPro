@@ -167,6 +167,14 @@ public abstract class AbstractOutboxProIntegrationTest {
                     statement.execute("CREATE DATABASE IF NOT EXISTS outbox_it_nonretry");
                     yield "outbox_it_nonretry";
                 }
+                case "retention" -> {
+                    statement.execute("CREATE DATABASE IF NOT EXISTS outbox_it_retention");
+                    yield "outbox_it_retention";
+                }
+                case "staleinbox" -> {
+                    statement.execute("CREATE DATABASE IF NOT EXISTS outbox_it_staleinbox");
+                    yield "outbox_it_staleinbox";
+                }
                 default -> throw new IllegalArgumentException("未登记的测试数据库键: " + key);
             };
         } catch (SQLException error) {

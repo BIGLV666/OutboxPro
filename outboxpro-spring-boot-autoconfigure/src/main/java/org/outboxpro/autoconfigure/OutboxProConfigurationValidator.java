@@ -1,5 +1,7 @@
 package org.outboxpro.autoconfigure;
 
+import java.time.Duration;
+
 /**
  * OutboxPro 全局配置的启动校验器。
  *
@@ -27,6 +29,7 @@ public final class OutboxProConfigurationValidator {
         validateConsumer(properties);
         validateRetry(properties);
         validateObservability(properties);
+        validateRetention(properties);
     }
 
     /** 校验生产端配置范围。 */
@@ -70,6 +73,72 @@ public final class OutboxProConfigurationValidator {
         }
         if (consumer.getPrefetch() <= 0) {
             throw new IllegalStateException("outboxpro.consumer.prefetch must be positive");
+        }
+        validateDuration(consumer.getRedeliveryDelay(), "outboxpro.consumer.redelivery-delay", true, Duration.ofSeconds(60));
+        // RECEIVED 重开超时过小会让并发重复投递在正常 Handler 执行期间互相重开，造成双重执行。
+        validateDuration(consumer.getInboxReceivedStaleTimeout(), "outboxpro.consumer.inbox-received-stale-timeout",
+                false, null);
+        if (consumer.getInboxReceivedStaleTimeout().compareTo(Duration.ofMinutes(1)) < 0) {
+            throw new IllegalStateException(
+                    "outboxpro.consumer.inbox-received-stale-timeout must be at least 1m to avoid re-opening "
+                            + "RECEIVED inbox rows while a concurrent delivery is still executing");
+        }
+        if (consumer.getMaxRetryQueueCount() < 1) {
+            throw new IllegalStateException(
+                    "outboxpro.consumer.max-retry-queue-count must be >= 1 (total retry queues across "
+                            + "all subscriptions; reduce per-binding maxAttempts or disable retry instead)");
+        }
+    }
+
+    /**
+     * 校验消费端新增的时长配置。
+     *
+     * @param value 配置值
+     * @param name 配置名
+     * @param allowZero 是否允许为零
+     * @param max 上限；null 表示不限制
+     */
+    private void validateDuration(Duration value, String name, boolean allowZero, Duration max) {
+        if (value == null || value.isNegative() || (!allowZero && value.isZero())) {
+            throw new IllegalStateException(name + " must be a positive duration"
+                    + (allowZero ? " (0 allowed)" : ""));
+        }
+        if (max != null && value.compareTo(max) > 0) {
+            throw new IllegalStateException(name + " must not exceed " + max);
+        }
+    }
+
+    /** 校验历史数据保留策略配置范围。 */
+    private void validateRetention(OutboxProProperties properties) {
+        OutboxProProperties.Retention retention = properties.getRetention();
+        if (retention == null) {
+            throw new IllegalStateException("outboxpro.retention configuration must not be null");
+        }
+        if (!retention.isEnabled()) {
+            return;
+        }
+        if (retention.getOutboxSent() == null || retention.getOutboxSent().isNegative()
+                || retention.getOutboxSent().isZero()) {
+            throw new IllegalStateException("outboxpro.retention.outbox-sent must be a positive duration, e.g. 14d");
+        }
+        if (retention.getInboxSuccess() == null || retention.getInboxSuccess().isNegative()
+                || retention.getInboxSuccess().isZero()) {
+            throw new IllegalStateException("outboxpro.retention.inbox-success must be a positive duration, e.g. 30d");
+        }
+        if (retention.getMessageLog() == null || retention.getMessageLog().isNegative()
+                || retention.getMessageLog().isZero()) {
+            throw new IllegalStateException("outboxpro.retention.message-log must be a positive duration, e.g. 14d");
+        }
+        if (retention.getDeadLetterReplayed() == null || retention.getDeadLetterReplayed().isNegative()
+                || retention.getDeadLetterReplayed().isZero()) {
+            throw new IllegalStateException(
+                    "outboxpro.retention.dead-letter-replayed must be a positive duration, e.g. 30d");
+        }
+        if (retention.getBatchSize() <= 0) {
+            throw new IllegalStateException("outboxpro.retention.batch-size must be positive");
+        }
+        if (retention.getMaxRowsPerCycle() <= 0) {
+            throw new IllegalStateException("outboxpro.retention.max-rows-per-cycle must be positive");
         }
     }
 

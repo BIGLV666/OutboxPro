@@ -8,6 +8,7 @@ import org.outboxpro.spi.deadletter.DlqReplayAuthorizer;
 import org.outboxpro.spi.persistence.OutboxQuery;
 import org.outboxpro.spi.persistence.OutboxRecord;
 import org.outboxpro.spi.persistence.OutboxRepository;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.actuate.endpoint.web.annotation.RestControllerEndpoint;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -43,6 +44,7 @@ public final class OutboxOpsEndpoint {
     private final OutboxRepository outboxRepository;
     private final DeadLetterRepository deadLetterRepository;
     private final DlqReplayAuthorizer authorizer;
+    private final ObjectProvider<RetentionTask> retentionTask;
 
     /**
      * 创建运维端点。
@@ -50,17 +52,21 @@ public final class OutboxOpsEndpoint {
      * @param outboxRepository Outbox 仓储
      * @param deadLetterRepository 死信台账仓储
      * @param authorizer 授权器；未配置时使用默认全拒绝实现
+     * @param retentionTask 保留任务；手动清理复用与定时调度相同的分批删除逻辑
      */
     public OutboxOpsEndpoint(OutboxRepository outboxRepository,
                              DeadLetterRepository deadLetterRepository,
-                             DlqReplayAuthorizer authorizer) {
+                             DlqReplayAuthorizer authorizer,
+                             ObjectProvider<RetentionTask> retentionTask) {
         this.outboxRepository = outboxRepository;
         this.deadLetterRepository = deadLetterRepository;
         this.authorizer = authorizer;
+        this.retentionTask = retentionTask;
     }
 
     /**
      * 分页检索 Outbox 消息。
+     * 注意：total 统计与当页数据是两条独立查询，不是同一快照，清理任务运行期间可能轻微漂移。
      *
      * @param status Outbox 状态过滤（PENDING / PROCESSING / RETRY_WAITING / SENT / DEAD）
      * @param eventType 事件类型精确过滤
@@ -148,9 +154,44 @@ public final class OutboxOpsEndpoint {
         return new PageResult<>(deadLetterRepository.countDeadLetters(query), page, items);
     }
 
+    /**
+     * 手动触发一轮历史数据清理：分批删除 Outbox SENT、Inbox SUCCESS、消息日志与
+     * 死信台账 REPLAYED 中超过保留期的行。复用与定时调度完全相同的
+     * {@link RetentionTask#purge()} 短事务分批逻辑（单语句 LIMIT 限批，不长事务锁表），
+     * 清理运行中重复调用只返回 skipped。
+     *
+     * @param request 操作人与原因，用于授权与审计
+     * @return 各表实际删除行数
+     */
+    @PostMapping("/retention/purge")
+    public PurgeOutcome purgeRetention(@RequestBody OpsRequest request) {
+        validateOperator(request);
+        authorizer.authorize("retention:purge", request.operator());
+        RetentionTask task = retentionTask.getIfAvailable();
+        if (task == null) {
+            return new PurgeOutcome(0, 0, 0, 0, true,
+                    "Retention task is not available in this application (DataSource or repositories missing)");
+        }
+        RetentionTask.PurgeResult result = task.purge();
+        return new PurgeOutcome(result.outboxSent(), result.inboxSuccess(), result.messageLog(),
+                result.deadLetterReplayed(), result.skipped(),
+                result.skipped() ? "Purge skipped (retention disabled or already running)"
+                        : "Purge finished");
+    }
+
+    /** 校验仅含操作人/原因的请求体。 */
+    private void validateOperator(OpsRequest request) {
+        if (request == null || request.operator() == null || request.operator().isBlank()
+                || request.operator().length() > 200) {
+            throw new IllegalArgumentException("operator must be between 1 and 200 characters");
+        }
+        if (request.reason() == null || request.reason().isBlank() || request.reason().length() > 1000) {
+            throw new IllegalArgumentException("reason must be between 1 and 1000 characters");
+        }
+    }
+
     /** 校验请求参数，避免超长输入进入 SQL、日志或审计表。 */
-    private void validateRequest(String eventId, OpsRequest request) {
-        if (eventId == null || eventId.isBlank() || eventId.length() > 100) {
+    private void validateRequest(String eventId, OpsRequest request) {        if (eventId == null || eventId.isBlank() || eventId.length() > 100) {
             throw new IllegalArgumentException("eventId must be between 1 and 100 characters");
         }
         if (request == null || request.operator() == null || request.operator().isBlank()
@@ -181,6 +222,10 @@ public final class OutboxOpsEndpoint {
 
     /** 运维请求体。 */
     public record OpsRequest(String operator, String reason) { }
+
+    /** 手动清理结果：各表删除行数与跳过标记。 */
+    public record PurgeOutcome(long outboxSent, long inboxSuccess, long messageLog,
+                               long deadLetterReplayed, boolean skipped, String message) { }
 
     /** 重放复位结果。 */
     public record ReplayOutcome(String eventId, boolean reset, String message) { }

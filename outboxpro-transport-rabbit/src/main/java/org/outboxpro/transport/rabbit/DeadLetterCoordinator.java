@@ -1,6 +1,5 @@
 package org.outboxpro.transport.rabbit;
 
-import org.outboxpro.core.exception.NonRetryableEventException;
 import org.outboxpro.core.exception.NonRetryableExceptions;
 import org.outboxpro.core.subscription.EventBinding;
 import org.outboxpro.core.subscription.OutboxProSubscription;
@@ -26,7 +25,7 @@ import java.util.concurrent.TimeUnit;
  * </ul>
  */
 public final class DeadLetterCoordinator {
-    private static final long REPUBLISH_CONFIRM_TIMEOUT_SECONDS = 10;
+    private static final long DEFAULT_CONFIRM_TIMEOUT_MILLIS = 10_000;
     private static final long DISPATCH_LEASE_SECONDS = 60;
 
     private final DeadLetterHandlingMode handlingMode;
@@ -35,9 +34,11 @@ public final class DeadLetterCoordinator {
     private final DeadLetterAlertNotifier deadLetterNotifier;
     private final RabbitTemplate rabbitTemplate;
     private final boolean ledgerEnabled;
+    /** 框架模式发布 DLQ 等待 Publisher Confirm 的超时，与生产端 confirm-timeout 使用同一配置。 */
+    private final long confirmTimeoutMillis;
 
     /**
-     * 创建死信协调器。
+     * 创建死信协调器（Confirm 超时使用默认 10 秒）。
      *
      * @param handlingMode 框架或自定义模式
      * @param deadLetterRepository 死信台账仓储；台账关闭时为 {@code null}
@@ -52,12 +53,29 @@ public final class DeadLetterCoordinator {
                                  DeadLetterAlertNotifier deadLetterNotifier,
                                  RabbitTemplate rabbitTemplate,
                                  boolean ledgerEnabled) {
+        this(handlingMode, deadLetterRepository, deadLetterStrategy, deadLetterNotifier,
+                rabbitTemplate, ledgerEnabled, DEFAULT_CONFIRM_TIMEOUT_MILLIS);
+    }
+
+    /**
+     * 创建死信协调器。
+     *
+     * @param confirmTimeoutMillis 框架模式发布 DLQ 等待 Publisher Confirm 的超时毫秒数
+     */
+    public DeadLetterCoordinator(DeadLetterHandlingMode handlingMode,
+                                 DeadLetterRepository deadLetterRepository,
+                                 DeadLetterStrategy deadLetterStrategy,
+                                 DeadLetterAlertNotifier deadLetterNotifier,
+                                 RabbitTemplate rabbitTemplate,
+                                 boolean ledgerEnabled,
+                                 long confirmTimeoutMillis) {
         this.handlingMode = handlingMode;
         this.deadLetterRepository = deadLetterRepository;
         this.deadLetterStrategy = deadLetterStrategy;
         this.deadLetterNotifier = deadLetterNotifier;
         this.rabbitTemplate = rabbitTemplate;
         this.ledgerEnabled = ledgerEnabled;
+        this.confirmTimeoutMillis = confirmTimeoutMillis <= 0 ? DEFAULT_CONFIRM_TIMEOUT_MILLIS : confirmTimeoutMillis;
     }
 
     /**
@@ -217,7 +235,7 @@ public final class DeadLetterCoordinator {
             // JSON 解析失败或消息结构不合法，继续重试没有意义。
             return DeadLetterReasonCode.MALFORMED_MESSAGE;
         }
-        if (hasCause(error, NonRetryableEventException.class) || NonRetryableExceptions.isNonRetryable(error)) {
+        if (NonRetryableExceptions.isNonRetryable(error)) {
             // 业务明确声明不可重试（框架异常或 @NonRetryable 标注），即使异常被调用链包装也必须保留原语义。
             return DeadLetterReasonCode.NON_RETRYABLE_EXCEPTION;
         }
@@ -241,8 +259,7 @@ public final class DeadLetterCoordinator {
      * 判断错误是否可重试。
      */
     private boolean isRetryable(RuntimeException error, EventBinding binding) {
-        return !hasCause(error, NonRetryableEventException.class)
-                && !NonRetryableExceptions.isNonRetryable(error)
+        return !NonRetryableExceptions.isNonRetryable(error)
                 && binding != null
                 && binding.retryPolicy().enabled();
     }
@@ -275,9 +292,12 @@ public final class DeadLetterCoordinator {
             return message;
         }, correlation);
         try {
-            if (!correlation.getFuture().get(REPUBLISH_CONFIRM_TIMEOUT_SECONDS, TimeUnit.SECONDS).isAck()) {
+            if (!correlation.getFuture().get(confirmTimeoutMillis, TimeUnit.MILLISECONDS).isAck()) {
                 throw new IllegalStateException("RabbitMQ rejected dead letter message");
             }
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("RabbitMQ confirm wait was interrupted for dead letter message", error);
         } catch (Exception error) {
             throw new IllegalStateException("RabbitMQ confirm failed for dead letter message", error);
         }

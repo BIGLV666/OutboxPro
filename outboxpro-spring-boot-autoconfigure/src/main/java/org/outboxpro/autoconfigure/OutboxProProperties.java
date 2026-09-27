@@ -19,6 +19,7 @@ public class OutboxProProperties {
     private DeadLetterQueueProperties dlq = new DeadLetterQueueProperties();
     private boolean schemaInitialize = true;
     private Ops ops = new Ops();
+    private Retention retention = new Retention();
 
     /** 返回是否启用 OutboxPro 自动装配。 */
     public boolean isEnabled() { return enabled; }
@@ -56,6 +57,10 @@ public class OutboxProProperties {
     public Ops getOps() { return ops; }
     /** 设置运维端点配置。 */
     public void setOps(Ops ops) { this.ops = ops; }
+    /** 返回历史数据保留策略配置。 */
+    public Retention getRetention() { return retention; }
+    /** 设置历史数据保留策略配置。 */
+    public void setRetention(Retention retention) { this.retention = retention; }
 
     /** 运维查询端点配置。 */
     public static class Ops {
@@ -126,6 +131,93 @@ public class OutboxProProperties {
         public boolean isIdempotencyEnabled() { return idempotencyEnabled; }
         /** 设置是否启用 Inbox 幂等。V1 默认必须开启。 */
         public void setIdempotencyEnabled(boolean idempotencyEnabled) { this.idempotencyEnabled = idempotencyEnabled; }
+
+        /**
+         * 重试或死信转发失败、需要 NACK + requeue 保底时的重投递延迟。
+         * 没有该延迟时，目标系统故障会让消息被 RabbitMQ 立即重投并全速热循环，
+         * 消耗全部消费线程；默认 1s，把循环频率压到每消费线程每秒一次。
+         */
+        private Duration redeliveryDelay = Duration.ofSeconds(1);
+
+        /**
+         * Inbox RECEIVED 状态被视为孤儿记录的超时时间。
+         * Best Effort 的 RECEIVED 记录在事务外提交，进程在 Handler 执行中途崩溃会留下
+         * 永久 RECEIVED；超过该超时后重投递允许重开记录重新执行。默认 10 分钟，
+         * 必须大于最坏 Handler 执行时长，否则并发重复投递可能双重执行。
+         */
+        private Duration inboxReceivedStaleTimeout = Duration.ofMinutes(10);
+
+        /**
+         * 全部订阅允许声明的 Retry Queue 总量上限（Σ 每个启用重试绑定的 maxAttempts-1）。
+         * 订阅或重试档位过多会让 Broker 队列数量失控，启动时快速失败并给出收缩指引。
+         */
+        private int maxRetryQueueCount = 100;
+
+        /** 返回 NACK + requeue 前的重投递延迟。 */
+        public Duration getRedeliveryDelay() { return redeliveryDelay; }
+        /** 设置 NACK + requeue 前的重投递延迟；0 表示立即重投（不推荐）。 */
+        public void setRedeliveryDelay(Duration redeliveryDelay) { this.redeliveryDelay = redeliveryDelay; }
+        /** 返回 RECEIVED 孤儿记录的重开超时。 */
+        public Duration getInboxReceivedStaleTimeout() { return inboxReceivedStaleTimeout; }
+        /** 设置 RECEIVED 孤儿记录的重开超时。 */
+        public void setInboxReceivedStaleTimeout(Duration inboxReceivedStaleTimeout) {
+            this.inboxReceivedStaleTimeout = inboxReceivedStaleTimeout;
+        }
+        /** 返回 Retry Queue 总量上限。 */
+        public int getMaxRetryQueueCount() { return maxRetryQueueCount; }
+        /** 设置 Retry Queue 总量上限。 */
+        public void setMaxRetryQueueCount(int maxRetryQueueCount) { this.maxRetryQueueCount = maxRetryQueueCount; }
+    }
+
+    /** 历史数据保留策略配置：周期性分批清理框架三张表和死信台账中的可清理终态行。 */
+    public static class Retention {
+        /** 默认开启：不清理会导致 outbox SENT / inbox SUCCESS / message_log 无限增长。 */
+        private boolean enabled = true;
+        /**
+         * Outbox 表 SENT 记录保留时长。
+         * 默认 3 天：SENT 是终态，保留仅服务短期排障，保留越久 Relay 认领查询扫过的
+         * 死行越多；配合保留任务每小时增量清理，表规模稳定在 3 天窗口内。
+         */
+        private Duration outboxSent = Duration.ofDays(3);
+        /** Inbox 表 SUCCESS 记录保留时长。 */
+        private Duration inboxSuccess = Duration.ofDays(30);
+        /** 消息日志表记录保留时长。 */
+        private Duration messageLog = Duration.ofDays(14);
+        /** 死信台账 REPLAYED 记录保留时长。 */
+        private Duration deadLetterReplayed = Duration.ofDays(30);
+        /** 单次 DELETE 的批大小，避免长事务锁表。 */
+        private int batchSize = 500;
+        /** 每轮清理任务对单张表的最大删除行数上限。 */
+        private int maxRowsPerCycle = 20000;
+
+        /** 返回是否启用保留策略。 */
+        public boolean isEnabled() { return enabled; }
+        /** 设置是否启用保留策略。 */
+        public void setEnabled(boolean enabled) { this.enabled = enabled; }
+        /** 返回 Outbox SENT 记录保留时长。 */
+        public Duration getOutboxSent() { return outboxSent; }
+        /** 设置 Outbox SENT 记录保留时长。 */
+        public void setOutboxSent(Duration outboxSent) { this.outboxSent = outboxSent; }
+        /** 返回 Inbox SUCCESS 记录保留时长。 */
+        public Duration getInboxSuccess() { return inboxSuccess; }
+        /** 设置 Inbox SUCCESS 记录保留时长。 */
+        public void setInboxSuccess(Duration inboxSuccess) { this.inboxSuccess = inboxSuccess; }
+        /** 返回消息日志记录保留时长。 */
+        public Duration getMessageLog() { return messageLog; }
+        /** 设置消息日志记录保留时长。 */
+        public void setMessageLog(Duration messageLog) { this.messageLog = messageLog; }
+        /** 返回死信台账 REPLAYED 记录保留时长。 */
+        public Duration getDeadLetterReplayed() { return deadLetterReplayed; }
+        /** 设置死信台账 REPLAYED 记录保留时长。 */
+        public void setDeadLetterReplayed(Duration deadLetterReplayed) { this.deadLetterReplayed = deadLetterReplayed; }
+        /** 返回单次 DELETE 批大小。 */
+        public int getBatchSize() { return batchSize; }
+        /** 设置单次 DELETE 批大小。 */
+        public void setBatchSize(int batchSize) { this.batchSize = batchSize; }
+        /** 返回每轮单表最大删除行数。 */
+        public int getMaxRowsPerCycle() { return maxRowsPerCycle; }
+        /** 设置每轮单表最大删除行数。 */
+        public void setMaxRowsPerCycle(int maxRowsPerCycle) { this.maxRowsPerCycle = maxRowsPerCycle; }
     }
 
     /** 默认 Retry Queue 使用的退避配置。 */

@@ -29,6 +29,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -44,7 +45,6 @@ import org.slf4j.MDC;
  * Reliable 模式只有在本地事务提交成功后才 ACK；重试消息成功写入 Retry Queue 后才 ACK 原消息。
  */
 public final class RabbitConsumerManager implements AutoCloseable {
-    private static final long REPUBLISH_CONFIRM_TIMEOUT_SECONDS = 10;
 
     private final ConnectionFactory connectionFactory;
     private final RabbitTemplate rabbitTemplate;
@@ -58,6 +58,10 @@ public final class RabbitConsumerManager implements AutoCloseable {
     private final OutboxMetrics metrics;
     private final int concurrency;
     private final int prefetch;
+    /** 转发失败 NACK + requeue 前的重投递延迟；避免目标系统故障时消息被立即重投形成热循环。 */
+    private final Duration redeliveryDelay;
+    /** 重试/死信转发等待 Publisher Confirm 的超时，与生产端 confirm-timeout 使用同一配置。 */
+    private final Duration confirmTimeout;
     private final List<SimpleMessageListenerContainer> containers = new CopyOnWriteArrayList<>();
 
     /**
@@ -75,6 +79,8 @@ public final class RabbitConsumerManager implements AutoCloseable {
      * @param metrics 指标上报门面，可为空
      * @param concurrency 每个队列的消费者并发数
      * @param prefetch RabbitMQ 单消费者预取数量
+     * @param confirmTimeout 转发等待 Publisher Confirm 的超时
+     * @param redeliveryDelay 转发失败 NACK + requeue 前的重投递延迟
      */
     public RabbitConsumerManager(ConnectionFactory connectionFactory, RabbitTemplate rabbitTemplate,
                                  ObjectMapper objectMapper, InboxRepository inboxRepository,
@@ -84,7 +90,8 @@ public final class RabbitConsumerManager implements AutoCloseable {
                                  MessageLogSink logSink,
                                  DeadLetterCoordinator deadLetterCoordinator,
                                  OutboxMetrics metrics,
-                                 int concurrency, int prefetch) {
+                                 int concurrency, int prefetch,
+                                 Duration confirmTimeout, Duration redeliveryDelay) {
         this.connectionFactory = connectionFactory;
         this.rabbitTemplate = rabbitTemplate;
         this.objectMapper = objectMapper;
@@ -97,6 +104,8 @@ public final class RabbitConsumerManager implements AutoCloseable {
         this.metrics = metrics == null ? OutboxMetrics.NOOP : metrics;
         this.concurrency = concurrency;
         this.prefetch = prefetch;
+        this.confirmTimeout = confirmTimeout == null ? Duration.ofSeconds(10) : confirmTimeout;
+        this.redeliveryDelay = redeliveryDelay == null ? Duration.ZERO : redeliveryDelay;
     }
 
     /**
@@ -141,18 +150,12 @@ public final class RabbitConsumerManager implements AutoCloseable {
         String payloadJson = new String(message.getBody(), StandardCharsets.UTF_8);
         String receivedRoutingKey = message.getMessageProperties().getReceivedRoutingKey();
         int attempt = headerInt(message, "x-outboxpro-attempt", 1);
-        JsonNode root;
-        String eventType;
-        String eventId;
 
+        // Envelope 结构与载荷类型的解析必须纳入死信流程，否则非法消息会直接从 Listener 抛出并无限 requeue，
+        // 或被误判为 Handler 失败烧满重试预算。这里一次性解析出 Envelope 的全部字段。
+        ParsedEnvelope parsed;
         try {
-            // JSON 解析必须纳入死信流程，否则非法消息会直接从 Listener 抛出并无限 requeue。
-            root = objectMapper.readTree(payloadJson);
-            if (root == null || !root.isObject()) {
-                throw new IllegalArgumentException("OutboxPro message root must be a JSON object");
-            }
-            eventType = text(root, "eventType");
-            eventId = text(root, "eventId");
+            parsed = parseEnvelope(payloadJson);
         } catch (Exception parseError) {
             // 缺失 eventId 时使用消息 ID 或内容哈希，确保重复投递仍能落到同一条死信台账。
             String fallbackEventId = fallbackEventId(message);
@@ -166,11 +169,15 @@ public final class RabbitConsumerManager implements AutoCloseable {
                 channel.basicAck(deliveryTag, false);
             } catch (RuntimeException deadLetterError) {
                 // 死信目标未可靠接收时保留原消息，避免解析失败变成静默丢失。
+                delayBeforeRedelivery();
                 channel.basicNack(deliveryTag, false, true);
             }
             return;
         }
 
+        String eventType = parsed.eventType();
+        String stableEventId = parsed.eventId() == null || parsed.eventId().isBlank()
+                ? fallbackEventId(message) : parsed.eventId();
         EventBinding binding = findBinding(subscription, eventType);
 
         // 当前 Queue 不订阅这个 eventType，继续重试没有意义，通过死信协调器处理。
@@ -178,18 +185,18 @@ public final class RabbitConsumerManager implements AutoCloseable {
             // 未绑定的事件类型可能是外部注入的任意字符串，指标标签统一记 unknown。
             metrics.consumeDead("unknown", subscription.getConsumerName(), subscription.getQueue());
             try {
-                deadLetterCoordinator.handle(subscription, null, payloadJson, eventIdOrFallback(eventId, message),
-                        eventType, receivedRoutingKey, attempt, null,
+                deadLetterCoordinator.handle(subscription, null, payloadJson, stableEventId, eventType,
+                        receivedRoutingKey, attempt, null,
                         RabbitTopologyManager.deadExchange(subscription));
                 channel.basicAck(deliveryTag, false);
             } catch (RuntimeException error) {
                 // 死信处理失败，NACK + requeue。
+                delayBeforeRedelivery();
                 channel.basicNack(deliveryTag, false, true);
             }
             return;
         }
 
-        String stableEventId = eventIdOrFallback(eventId, message);
         long startedNanos = System.nanoTime();
         try {
             // 订阅与 Handler 的归属关系在启动时校验过，这里兜底防御，避免错误路由到别的消费方。
@@ -200,9 +207,9 @@ public final class RabbitConsumerManager implements AutoCloseable {
             }
             metrics.consumeStarted(eventType, subscription.getConsumerName(), subscription.getQueue());
             if (binding.consumeMode() == ConsumeMode.RELIABLE) {
-                processReliable(subscription, binding, handler, root, stableEventId, attempt);
+                processReliable(subscription, binding, handler, parsed, stableEventId, attempt);
             } else {
-                processBestEffort(subscription, binding, handler, root, stableEventId, attempt, startedNanos);
+                processBestEffort(subscription, binding, handler, parsed, stableEventId, attempt, startedNanos);
             }
 
             // Reliable 分支到达这里代表 Handler、Inbox SUCCESS 和本地事务均已成功提交。
@@ -218,11 +225,36 @@ public final class RabbitConsumerManager implements AutoCloseable {
     }
 
     /**
+     * 解析 OutboxPro Envelope 的全部结构字段。
+     * 根对象、eventType/eventId、occurredAt 时间戳任一非法都视为 MALFORMED_MESSAGE，
+     * 直接进入死信流程而不是作为 Handler 失败重试。
+     */
+    private ParsedEnvelope parseEnvelope(String payloadJson) {
+        JsonNode root;
+        try {
+            root = objectMapper.readTree(payloadJson);
+            if (root == null || !root.isObject()) {
+                throw new IllegalArgumentException("OutboxPro message root must be a JSON object");
+            }
+            String eventType = text(root, "eventType");
+            String eventId = text(root, "eventId");
+            Instant occurredAt = Instant.parse(root.path("occurredAt").asText(null));
+            return new ParsedEnvelope(root, eventType, eventId,
+                    root.path("schemaVersion").asText("v1"),
+                    root.path("producer").asText("unknown"),
+                    occurredAt,
+                    text(root, "traceId"), text(root, "correlationId"), text(root, "causationId"));
+        } catch (Exception parseError) {
+            throw new MalformedMessageException("Malformed OutboxPro envelope", parseError);
+        }
+    }
+
+    /**
      * 在同一数据库事务中执行 Handler 与 Inbox SUCCESS 更新。
      * 如果 Handler 或提交阶段失败，事务回滚且不会 ACK 原消息。
      */
     private void processReliable(OutboxProSubscription subscription, EventBinding binding, OutboxProHandler<?> handler,
-                                 JsonNode root, String eventId, int attempt) {
+                                 ParsedEnvelope parsed, String eventId, int attempt) {
         Boolean processed = transactionTemplate.execute(status -> {
             InboxRecord inbox = new InboxRecord(eventId, binding.eventType(), "RECEIVED", attempt - 1, Instant.now());
             // 已经成功处理的 eventId 不再次执行业务逻辑，直接交由调用方 ACK。
@@ -230,7 +262,7 @@ public final class RabbitConsumerManager implements AutoCloseable {
                 metrics.inboxDuplicate(binding.eventType(), subscription.getConsumerName());
                 return false;
             }
-            invoke(handler, binding.payloadType(), root);
+            invoke(handler, binding.payloadType(), parsed);
             inboxRepository.markSuccess(subscription.getConsumerName(), eventId);
             return true;
         });
@@ -245,14 +277,14 @@ public final class RabbitConsumerManager implements AutoCloseable {
      * 执行 Best Effort Handler。异常被记录为 IGNORED，避免无价值的无限重试阻塞业务队列。
      */
     private void processBestEffort(OutboxProSubscription subscription, EventBinding binding, OutboxProHandler<?> handler,
-                                   JsonNode root, String eventId, int attempt, long startedNanos) {
+                                   ParsedEnvelope parsed, String eventId, int attempt, long startedNanos) {
         InboxRecord inbox = new InboxRecord(eventId, binding.eventType(), "RECEIVED", attempt - 1, Instant.now());
         if (!inboxRepository.tryStart(subscription.getConsumerName(), inbox)) {
             metrics.inboxDuplicate(binding.eventType(), subscription.getConsumerName());
             return;
         }
         try {
-            invoke(handler, binding.payloadType(), root);
+            invoke(handler, binding.payloadType(), parsed);
             inboxRepository.markSuccess(subscription.getConsumerName(), eventId);
         } catch (RuntimeException error) {
             inboxRepository.markIgnored(subscription.getConsumerName(), eventId, error.getMessage());
@@ -267,8 +299,8 @@ public final class RabbitConsumerManager implements AutoCloseable {
                                Channel channel, long deliveryTag, String eventId, String eventType,
                                String receivedRoutingKey, int attempt,
                                long startedNanos, RuntimeException error) throws Exception {
-        // 不可重试（框架异常或 @NonRetryable 标注）或已耗尽次数时，通过死信协调器处理。
-        boolean nonRetryable = NonRetryableExceptions.isNonRetryable(error);
+        // 不可重试（框架异常或 @NonRetryable 标注）、报文损坏或已耗尽次数时，通过死信协调器处理。
+        boolean nonRetryable = NonRetryableExceptions.isNonRetryable(error) || hasMalformedCause(error);
         boolean retryable = !nonRetryable
                 && binding.retryPolicy().enabled()
                 && attempt < binding.retryPolicy().maxAttempts();
@@ -289,9 +321,36 @@ public final class RabbitConsumerManager implements AutoCloseable {
             }
         } catch (RuntimeException republishError) {
             // 重试或死信副本未确认时，NACK + requeue，避免静默丢失原消息。
+            // 先按配置退避再 requeue：目标系统故障时立即重投会形成全速热循环。
+            delayBeforeRedelivery();
             channel.basicNack(deliveryTag, false, true);
             log(eventId, eventType, subscription, MessageStatus.FAILED, attempt, startedNanos, republishError);
         }
+    }
+
+    /** 在当前线程上按配置延迟，把 requeue 热循环的频率限制到每消费线程一次/延迟。 */
+    private void delayBeforeRedelivery() {
+        long millis = redeliveryDelay.toMillis();
+        if (millis <= 0) {
+            return;
+        }
+        try {
+            Thread.sleep(millis);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    /** 判断异常因果链中是否包含消息格式异常（含被包装的情况）。 */
+    private boolean hasMalformedCause(Throwable error) {
+        Throwable current = error;
+        while (current != null) {
+            if (current instanceof MalformedMessageException) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
     }
 
     /** 把消息 Header 中的链路标识恢复到 MDC，Handler 日志即可携带同一 traceId。 */
@@ -312,11 +371,6 @@ public final class RabbitConsumerManager implements AutoCloseable {
         MDC.remove("traceId");
         MDC.remove("correlationId");
         MDC.remove("causationId");
-    }
-
-    /** 返回消息中的 eventId；缺失时生成可跨重投递复用的稳定 ID。 */
-    private String eventIdOrFallback(String eventId, Message message) {
-        return eventId == null || eventId.isBlank() ? fallbackEventId(message) : eventId;
     }
 
     /** 优先使用 Rabbit messageId，否则使用消息体 SHA-256，避免 malformed 消息每次生成不同 ID。 */
@@ -400,30 +454,37 @@ public final class RabbitConsumerManager implements AutoCloseable {
                 .orElse(null);
     }
 
-    /** 将 JSON 中的 payload 反序列化为 Binding 指定类型，再调用业务 Handler。 */
-    private void invoke(OutboxProHandler<?> rawHandler, Class<?> payloadType, JsonNode root) {
+    /**
+     * 将预解析 Envelope 中的 payload 反序列化为 Binding 指定类型，再调用业务 Handler。
+     * 载荷反序列化失败属于报文损坏，按 MALFORMED_MESSAGE 死信处理；
+     * Handler 自身抛出的异常（含 NonRetryableEventException）原样传播，不改变语义。
+     */
+    private void invoke(OutboxProHandler<?> rawHandler, Class<?> payloadType, ParsedEnvelope parsed) {
+        Object payload;
+        Map<String, Object> extensions;
         try {
-            Object payload = objectMapper.treeToValue(root.path("payload"), payloadType);
+            payload = objectMapper.treeToValue(parsed.root().path("payload"), payloadType);
             @SuppressWarnings("unchecked")
-            OutboxProHandler<Object> handler = (OutboxProHandler<Object>) rawHandler;
-            EventEnvelope<Object> envelope = new EventEnvelope<>(
-                    root.path("eventId").asText(),
-                    root.path("eventType").asText(),
-                    root.path("schemaVersion").asText("v1"),
-                    root.path("producer").asText("unknown"),
-                    Instant.parse(root.path("occurredAt").asText()),
-                    text(root, "traceId"),
-                    text(root, "correlationId"),
-                    text(root, "causationId"),
-                    payload,
-                    objectMapper.convertValue(root.path("extensions"), Map.class));
-            handler.handle(new EventContext<>(envelope));
-        } catch (RuntimeException error) {
-            // 保留 NonRetryableEventException 等框架语义，避免包装后被错误地重试。
-            throw error;
-        } catch (Exception error) {
-            throw new RuntimeException("Handler invocation failed", error);
+            Map<String, Object> parsedExtensions = objectMapper.convertValue(parsed.root().path("extensions"), Map.class);
+            extensions = parsedExtensions;
+        } catch (Exception deserializationError) {
+            throw new MalformedMessageException(
+                    "Payload cannot be deserialized to " + payloadType.getName(), deserializationError);
         }
+        @SuppressWarnings("unchecked")
+        OutboxProHandler<Object> handler = (OutboxProHandler<Object>) rawHandler;
+        EventEnvelope<Object> envelope = new EventEnvelope<>(
+                parsed.eventId() == null ? "" : parsed.eventId(),
+                parsed.eventType(),
+                parsed.schemaVersion(),
+                parsed.producer(),
+                parsed.occurredAt(),
+                parsed.traceId(),
+                parsed.correlationId(),
+                parsed.causationId(),
+                payload,
+                extensions);
+        handler.handle(new EventContext<>(envelope));
     }
 
     /** 把失败消息写入指定重试队列；队列 TTL（来自绑定 RetryPolicy）到期后会通过 DLX 回流到主队列。 */
@@ -449,9 +510,12 @@ public final class RabbitConsumerManager implements AutoCloseable {
             return message;
         }, correlation);
         try {
-            if (!correlation.getFuture().get(REPUBLISH_CONFIRM_TIMEOUT_SECONDS, TimeUnit.SECONDS).isAck()) {
+            if (!correlation.getFuture().get(confirmTimeout.toMillis(), TimeUnit.MILLISECONDS).isAck()) {
                 throw new IllegalStateException("RabbitMQ rejected " + reason + " message");
             }
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("RabbitMQ confirm wait was interrupted for " + reason + " message", error);
         } catch (Exception error) {
             throw new IllegalStateException("RabbitMQ confirm failed for " + reason + " message", error);
         }
@@ -496,5 +560,9 @@ public final class RabbitConsumerManager implements AutoCloseable {
         containers.forEach(SimpleMessageListenerContainer::stop);
         containers.clear();
     }
-}
 
+    /** 从消息 JSON 一次性解析出的 Envelope 字段集合，供事务处理与 Handler 调用复用。 */
+    private record ParsedEnvelope(JsonNode root, String eventType, String eventId, String schemaVersion,
+                                  String producer, Instant occurredAt, String traceId,
+                                  String correlationId, String causationId) { }
+}

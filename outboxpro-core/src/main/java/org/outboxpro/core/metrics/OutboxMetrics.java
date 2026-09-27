@@ -24,6 +24,12 @@ public interface OutboxMetrics {
     /** Relay 单轮认领的消息数量。 */
     default void relayClaimed(int count) { }
 
+    /**
+     * Relay 状态迁移时发现认领租约已丢失（发布成功或失败，但记录已被其他实例复位重认领）。
+     * 这是 claimTimeout 配置过短或实例长时间停顿的强信号，应当告警。
+     */
+    default void relayLeaseLost(String eventType, String producer) { }
+
     /** 消费端开始处理一条已绑定事件的消息。 */
     default void consumeStarted(String eventType, String consumer, String queue) { }
 

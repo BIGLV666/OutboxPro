@@ -6,6 +6,7 @@ import org.outboxpro.spi.deadletter.DeadLetterReasonCode;
 import org.outboxpro.spi.deadletter.DeadLetterRecord;
 import org.outboxpro.spi.deadletter.DeadLetterRepository;
 import org.outboxpro.spi.deadletter.DeadLetterStatus;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -75,19 +76,26 @@ public class JdbcDeadLetterRepository implements DeadLetterRepository {
     @Transactional
     public boolean beginDispatch(DeadLetterContext context, String owner, Instant leaseUntil) {
         DeadLetterReason reason = context.reason();
-        int inserted = jdbc.update("""
-                INSERT IGNORE INTO outboxpro_dead_letter (
-                    event_id, event_type, consumer_name, queue_name,
-                    original_exchange, original_routing_key, payload_json,
-                    attempt_count, reason_code, reason_retryable, reason_retry_exhausted,
-                    exception_type, exception_message, status, dispatch_owner, dispatch_until,
-                    replay_count, version
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'DISPATCHING', ?, ?, 0, 0)
-                """,
-                context.eventId(), context.eventType(), context.consumerName(), context.queue(),
-                context.originalExchange(), context.originalRoutingKey(), context.payloadJson(), context.attempt(),
-                reason.code().name(), reason.retryable(), reason.retryExhausted(),
-                reason.exceptionType(), truncate(reason.exceptionMessage()), owner, Timestamp.from(leaseUntil));
+        int inserted;
+        try {
+            // 显式 INSERT 而不是 INSERT IGNORE：唯一键冲突进入恢复路径，其他错误
+            // （如字段截断、连接异常）必须抛出，避免死信载荷静默不完整。
+            inserted = jdbc.update("""
+                    INSERT INTO outboxpro_dead_letter (
+                        event_id, event_type, consumer_name, queue_name,
+                        original_exchange, original_routing_key, payload_json,
+                        attempt_count, reason_code, reason_retryable, reason_retry_exhausted,
+                        exception_type, exception_message, status, dispatch_owner, dispatch_until,
+                        replay_count, version
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'DISPATCHING', ?, ?, 0, 0)
+                    """,
+                    context.eventId(), context.eventType(), context.consumerName(), context.queue(),
+                    context.originalExchange(), context.originalRoutingKey(), context.payloadJson(), context.attempt(),
+                    reason.code().name(), reason.retryable(), reason.retryExhausted(),
+                    reason.exceptionType(), truncate(reason.exceptionMessage()), owner, Timestamp.from(leaseUntil));
+        } catch (DuplicateKeyException duplicate) {
+            inserted = 0;
+        }
         if (inserted == 1) {
             // 新记录通过唯一键保证只有一个消费者获得分派权。
             return true;
@@ -477,6 +485,20 @@ public class JdbcDeadLetterRepository implements DeadLetterRepository {
         if (!where.isEmpty()) {
             where.append(" AND ");
         }
+    }
+
+    /**
+     * 分批清理已成功重放的记录：只清理 REPLAYED 终态（不触碰分派租约状态机和计数桶），
+     * 按主键序限量删除，避免长事务锁表。
+     */
+    @Override
+    public int purgeReplayedBefore(Instant cutoff, int limit) {
+        return jdbc.update("""
+                DELETE FROM outboxpro_dead_letter
+                WHERE status = 'REPLAYED' AND replayed_time IS NOT NULL AND replayed_time < ?
+                ORDER BY id
+                LIMIT ?
+                """, Timestamp.from(cutoff), limit);
     }
 }
 
