@@ -303,13 +303,28 @@ public class OutboxProAutoConfiguration {
      * <p>契约：通过注册同名 Bean 替换本模板时，必须是 DataSource 事务管理器支撑的
      * {@link TransactionTemplate}，且保持默认 {@code PROPAGATION_REQUIRED} 与默认隔离级别；
      * 改为 JPA 事务管理器或非 REQUIRED 传播会破坏"Handler 与 Inbox SUCCESS 同事务提交"
-     * 的 Reliable 语义，框架无法在运行期校验，务必理解该约束后再覆盖。</p>
+     * 的 Reliable 语义——启动期的 {@link TransactionTemplateContractValidator} 会通过
+     * 真实事务探测强制校验该契约，不满足即启动失败。</p>
      */
     @Bean
     @ConditionalOnBean(DataSource.class)
     @ConditionalOnMissingBean
     TransactionTemplate outboxProTransactionTemplate(DataSource dataSource) {
         return new TransactionTemplate(new DataSourceTransactionManager(dataSource));
+    }
+
+    /**
+     * TransactionTemplate 契约校验：启动时对框架事务模板执行一次真实事务探测，
+     * 验证传播行为为 REQUIRED、确实在目标 DataSource 上开启事务、提交与回滚路径可用。
+     * 用户覆盖的模板不满足契约时启动失败并给出修复指引，
+     * 避免 Reliable 消费语义在运行期静默错位。
+     */
+    @Bean
+    @ConditionalOnBean({DataSource.class, TransactionTemplate.class})
+    @ConditionalOnMissingBean
+    TransactionTemplateContractValidator outboxProTransactionTemplateContractValidator(
+            TransactionTemplate transactionTemplate, DataSource dataSource) {
+        return new TransactionTemplateContractValidator(transactionTemplate, dataSource);
     }
 
     /**
@@ -373,15 +388,18 @@ public class OutboxProAutoConfiguration {
     /**
      * 数据库消息日志 Sink：异步队列 + 定时批量写入 outboxpro_message_log。
      * 队列有界（有限内存保护），批量失败整批丢弃并限流告警，不影响消息主流程。
+     * 队列满丢弃与批量失败同时上报 logSink 降级指标，观测降级可被监控发现。
      */
     @Bean(destroyMethod = "close")
     @ConditionalOnMissingBean
     @ConditionalOnBean(DataSource.class)
     @ConditionalOnProperty(prefix = "outboxpro.observability", name = "message-log-sink", havingValue = "database")
-    MessageLogSink outboxProDatabaseMessageLogSink(JdbcTemplate jdbcTemplate, OutboxProProperties properties) {
+    MessageLogSink outboxProDatabaseMessageLogSink(JdbcTemplate jdbcTemplate, OutboxProProperties properties,
+                                                   ObjectProvider<OutboxMetrics> metrics) {
         OutboxProProperties.Observability.DbSink dbSink = properties.getObservability().getDbSink();
         return new DatabaseMessageLogSink(jdbcTemplate, dbSink.getQueueCapacity(),
-                dbSink.getBatchSize(), dbSink.getFlushIntervalMillis());
+                dbSink.getBatchSize(), dbSink.getFlushIntervalMillis(),
+                metrics.getIfAvailable(() -> OutboxMetrics.NOOP));
     }
 
     /**
@@ -456,12 +474,13 @@ public class OutboxProAutoConfiguration {
             OutboxRepository outboxRepository,
             DeadLetterRepository deadLetterRepository,
             ObjectProvider<DlqReplayAuthorizer> authorizer,
-            ObjectProvider<RetentionTask> retentionTask) {
+            ObjectProvider<RetentionTask> retentionTask,
+            ObjectProvider<DeadLetterReplayEndpoint> deadLetterReplayEndpoint) {
         DlqReplayAuthorizer defaultDeny = (scope, operator) -> {
             throw new SecurityException("No DlqReplayAuthorizer bean is configured for ops scope " + scope);
         };
         return new OutboxOpsEndpoint(outboxRepository, deadLetterRepository,
-                authorizer.getIfAvailable(() -> defaultDeny), retentionTask);
+                authorizer.getIfAvailable(() -> defaultDeny), retentionTask, deadLetterReplayEndpoint);
     }
 }
 

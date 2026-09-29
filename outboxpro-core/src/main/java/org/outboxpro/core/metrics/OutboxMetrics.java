@@ -30,6 +30,12 @@ public interface OutboxMetrics {
      */
     default void relayLeaseLost(String eventType, String producer) { }
 
+    /** 数据库消息日志 Sink 因队列满而丢弃日志记录。 */
+    default void logSinkDropped(int count) { }
+
+    /** 数据库消息日志 Sink 批量写入失败，整批日志被丢弃。 */
+    default void logSinkFlushFailed(int count) { }
+
     /** 消费端开始处理一条已绑定事件的消息。 */
     default void consumeStarted(String eventType, String consumer, String queue) { }
 

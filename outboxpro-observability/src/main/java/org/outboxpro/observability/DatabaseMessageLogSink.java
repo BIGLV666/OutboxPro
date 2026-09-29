@@ -47,6 +47,8 @@ public final class DatabaseMessageLogSink implements MessageLogSink, AutoCloseab
     private final AtomicLong droppedCount = new AtomicLong();
     private final AtomicLong lastDropWarnCount = new AtomicLong();
     private final AtomicBoolean writeFailureLogged = new AtomicBoolean(false);
+    /** 降级观测上报：队列满丢弃与批量失败各上报一次增量，无指标实现时为空门面。 */
+    private final org.outboxpro.core.metrics.OutboxMetrics metrics;
 
     /**
      * 创建数据库消息日志 Sink 并启动后台刷新线程。
@@ -57,12 +59,23 @@ public final class DatabaseMessageLogSink implements MessageLogSink, AutoCloseab
      * @param flushIntervalMillis 刷新间隔（毫秒）
      */
     public DatabaseMessageLogSink(JdbcTemplate jdbc, int queueCapacity, int batchSize, long flushIntervalMillis) {
+        this(jdbc, queueCapacity, batchSize, flushIntervalMillis, org.outboxpro.core.metrics.OutboxMetrics.NOOP);
+    }
+
+    /**
+     * 创建数据库消息日志 Sink 并启动后台刷新线程。
+     *
+     * @param metrics 降级观测指标上报门面
+     */
+    public DatabaseMessageLogSink(JdbcTemplate jdbc, int queueCapacity, int batchSize, long flushIntervalMillis,
+                                  org.outboxpro.core.metrics.OutboxMetrics metrics) {
         if (queueCapacity <= 0 || batchSize <= 0 || flushIntervalMillis <= 0) {
             throw new IllegalArgumentException("queueCapacity, batchSize and flushIntervalMillis must be positive");
         }
         this.jdbc = jdbc;
         this.queue = new ArrayBlockingQueue<>(queueCapacity);
         this.batchSize = batchSize;
+        this.metrics = metrics == null ? org.outboxpro.core.metrics.OutboxMetrics.NOOP : metrics;
         this.flusher = Executors.newScheduledThreadPool(1, runnable -> {
             Thread thread = new Thread(runnable, "outboxpro-message-log-sink");
             thread.setDaemon(true);
@@ -80,6 +93,8 @@ public final class DatabaseMessageLogSink implements MessageLogSink, AutoCloseab
         }
         if (!queue.offer(record)) {
             long dropped = droppedCount.incrementAndGet();
+            // 降级观测：丢弃一旦发生就必须可被指标发现，而不仅是日志告警。
+            metrics.logSinkDropped(1);
             long lastWarned = lastDropWarnCount.get();
             // 每累计 1000 条输出一次限流告警，避免日志风暴
             if (dropped - lastWarned >= 1000 && lastDropWarnCount.compareAndSet(lastWarned, dropped)) {
@@ -103,6 +118,8 @@ public final class DatabaseMessageLogSink implements MessageLogSink, AutoCloseab
             jdbc.batchUpdate(INSERT_SQL, batch);
             writeFailureLogged.set(false);
         } catch (RuntimeException writeError) {
+            // 降级观测：批量失败同样上报指标，运维能发现观测正在降级。
+            metrics.logSinkFlushFailed(batch.size());
             if (writeFailureLogged.compareAndSet(false, true)) {
                 log.warn("Message log batch write failed; dropped {} records (subsequent failures suppressed)",
                         batch.size(), writeError);

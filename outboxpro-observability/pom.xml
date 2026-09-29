@@ -5,8 +5,11 @@
     <name>OutboxPro Observability</name>
     <dependencies>
         <dependency><groupId>io.github.biglv666</groupId><artifactId>outboxpro-spi</artifactId><version>${project.version}</version></dependency>
+        <dependency><groupId>io.github.biglv666</groupId><artifactId>outboxpro-core</artifactId><version>${project.version}</version></dependency>
         <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-logging</artifactId></dependency>
         <dependency><groupId>io.micrometer</groupId><artifactId>micrometer-core</artifactId></dependency>
         <dependency><groupId>org.springframework</groupId><artifactId>spring-jdbc</artifactId></dependency>
+        <dependency><groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter</artifactId><scope>test</scope></dependency>
+        <dependency><groupId>org.assertj</groupId><artifactId>assertj-core</artifactId><scope>test</scope></dependency>
     </dependencies>
 </project>

@@ -45,6 +45,7 @@ public final class OutboxOpsEndpoint {
     private final DeadLetterRepository deadLetterRepository;
     private final DlqReplayAuthorizer authorizer;
     private final ObjectProvider<RetentionTask> retentionTask;
+    private final ObjectProvider<DeadLetterReplayEndpoint> deadLetterReplayEndpoint;
 
     /**
      * 创建运维端点。
@@ -53,15 +54,19 @@ public final class OutboxOpsEndpoint {
      * @param deadLetterRepository 死信台账仓储
      * @param authorizer 授权器；未配置时使用默认全拒绝实现
      * @param retentionTask 保留任务；手动清理复用与定时调度相同的分批删除逻辑
+     * @param deadLetterReplayEndpoint 单条重放端点；批量重放按命中记录逐条复用其租约、
+     *                                 次数限制与 Confirm 重发逻辑，不复制状态机
      */
     public OutboxOpsEndpoint(OutboxRepository outboxRepository,
                              DeadLetterRepository deadLetterRepository,
                              DlqReplayAuthorizer authorizer,
-                             ObjectProvider<RetentionTask> retentionTask) {
+                             ObjectProvider<RetentionTask> retentionTask,
+                             ObjectProvider<DeadLetterReplayEndpoint> deadLetterReplayEndpoint) {
         this.outboxRepository = outboxRepository;
         this.deadLetterRepository = deadLetterRepository;
         this.authorizer = authorizer;
         this.retentionTask = retentionTask;
+        this.deadLetterReplayEndpoint = deadLetterReplayEndpoint;
     }
 
     /**
@@ -179,6 +184,74 @@ public final class OutboxOpsEndpoint {
                         : "Purge finished");
     }
 
+    /**
+     * 批量重放死信台账：按事件类型 + 消费者名称筛选 PENDING_REPLAY 记录，
+     * 逐条复用单条重放的租约、次数限制与 Confirm 重发逻辑。
+     *
+     * <p>支持 {@code dryRun=true}：只统计命中数量，不执行任何重发，供运维先确认范围。</p>
+     *
+     * <p>批量重放不是原子操作：每批记录独立走单条重放流程，成功/失败分别计数并返回，
+     * 失败记录保持 PENDING_REPLAY 可再次重放，不受 maxReplayCount 额外限制。</p>
+     *
+     * @param eventType 事件类型精确过滤，必填
+     * @param consumerName 消费者名称精确过滤，必填
+     * @param limit 单次最多重放的记录数，默认 100，最大 1000
+     * @param dryRun 为 true 时只统计命中数量，不重发
+     * @param request 操作人与原因，用于授权与审计
+     * @return 命中数量、成功重放数量与失败数量
+     */
+    @PostMapping("/dlq/replay/batch")
+    public BatchReplayOutcome replayDeadLettersBatch(@RequestParam String eventType,
+                                                     @RequestParam String consumerName,
+                                                     @RequestParam(defaultValue = "100") int limit,
+                                                     @RequestParam(defaultValue = "false") boolean dryRun,
+                                                     @RequestBody OpsRequest request) {
+        validateOperator(request);
+        if (eventType == null || eventType.isBlank() || eventType.length() > 200) {
+            throw new IllegalArgumentException("eventType must be between 1 and 200 characters");
+        }
+        if (consumerName == null || consumerName.isBlank() || consumerName.length() > 200) {
+            throw new IllegalArgumentException("consumerName must be between 1 and 200 characters");
+        }
+        authorizer.authorize("dlq:replay:batch", request.operator());
+
+        DeadLetterReplayEndpoint replayEndpoint = deadLetterReplayEndpoint.getIfAvailable();
+        if (replayEndpoint == null) {
+            return new BatchReplayOutcome(0, 0, 0,
+                    "Dead letter replay endpoint is not available (outboxpro.dlq.replay.enabled=false)");
+        }
+
+        int pageSize = Math.min(Math.max(limit, 1), 1000);
+        DeadLetterQuery query = new DeadLetterQuery(eventType, consumerName,
+                DeadLetterStatus.PENDING_REPLAY, 0, pageSize);
+        List<DeadLetterRecord> matched = deadLetterRepository.findDeadLetters(query);
+        long matchedCount = deadLetterRepository.countDeadLetters(query);
+        if (dryRun) {
+            return new BatchReplayOutcome(matchedCount, 0, 0,
+                    "Dry run only; would replay " + matched.size() + " of " + matchedCount + " matched record(s)");
+        }
+
+        int succeeded = 0;
+        int failed = 0;
+        // 逐条复用单条重放逻辑：租约、次数限制、Confirm 与台账状态迁移保持一致。
+        for (DeadLetterRecord record : matched) {
+            try {
+                var outcome = replayEndpoint.replayByEventId(record.eventId(),
+                        new DeadLetterReplayEndpoint.ReplayRequest(request.operator(), request.reason()));
+                if (outcome.replayedCount() > 0) {
+                    succeeded += outcome.replayedCount();
+                } else {
+                    failed++;
+                }
+            } catch (RuntimeException error) {
+                failed++;
+            }
+        }
+        return new BatchReplayOutcome(matchedCount, succeeded, failed,
+                String.format("Batch replay finished: %d succeeded, %d failed of %d matched",
+                        succeeded, failed, matchedCount));
+    }
+
     /** 校验仅含操作人/原因的请求体。 */
     private void validateOperator(OpsRequest request) {
         if (request == null || request.operator() == null || request.operator().isBlank()
@@ -222,6 +295,9 @@ public final class OutboxOpsEndpoint {
 
     /** 运维请求体。 */
     public record OpsRequest(String operator, String reason) { }
+
+    /** 批量重放结果：命中数量、成功重放数量、失败数量与说明。 */
+    public record BatchReplayOutcome(long matchedCount, int replayedCount, int failedCount, String message) { }
 
     /** 手动清理结果：各表删除行数与跳过标记。 */
     public record PurgeOutcome(long outboxSent, long inboxSuccess, long messageLog,

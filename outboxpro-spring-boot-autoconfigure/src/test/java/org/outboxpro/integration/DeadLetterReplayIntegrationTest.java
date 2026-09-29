@@ -61,6 +61,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
                 "outboxpro.consumer.concurrency=1",
                 "outboxpro.dlq.replay.enabled=true",
                 "outboxpro.dlq.ledger.max-replay-count=1",
+                // 批量重放用例通过 ops 端点调用，需要显式开启
+                "outboxpro.ops.enabled=true",
                 // 告警任务在独立测试类中验证（其内部 alertFired 状态跨用例共享，无法在本类复位）
                 "outboxpro.dlq.alert.enabled=false"
         })
@@ -92,6 +94,9 @@ class DeadLetterReplayIntegrationTest extends AbstractOutboxProIntegrationTest {
 
     @Autowired
     DeadLetterReplayEndpoint replayEndpoint;
+
+    @Autowired
+    org.outboxpro.autoconfigure.OutboxOpsEndpoint opsEndpoint;
 
     @Autowired
     DeadLetterRepository deadLetterRepository;
@@ -363,5 +368,61 @@ class DeadLetterReplayIntegrationTest extends AbstractOutboxProIntegrationTest {
                 "SELECT COUNT(*) FROM outboxpro_dead_letter WHERE status = 'PENDING_REPLAY' AND consumer_name = ?",
                 Long.class, CONSUMER_NAME);
         return count == null ? 0 : count;
+    }
+
+    /** 批量重放：dryRun 只统计不重发；真实批量重放复用单条租约与 Confirm，台账迁移 REPLAYED。 */
+    @Test
+    void batchReplayDryRunAndRealReplay() {
+        String firstEventId = produceDeadLetter(51010L);
+        String secondEventId = produceDeadLetter(51011L);
+        long pendingBefore = deadLetterRepository.pendingReplayCount();
+
+        // dryRun：只统计命中数量，台账状态不得改变，消息不得重发。
+        var dryRun = opsEndpoint.replayDeadLettersBatch(EVENT_TYPE, CONSUMER_NAME, 100, true,
+                new org.outboxpro.autoconfigure.OutboxOpsEndpoint.OpsRequest("ops-alice", "scope check"));
+        assertThat(dryRun.matchedCount()).as("dryRun 应命中本类已产生的死信").isGreaterThanOrEqualTo(2);
+        assertThat(dryRun.replayedCount()).isZero();
+        assertThat(deadLetterRepository.pendingReplayCount()).as("dryRun 不得改变待重放计数")
+                .isEqualTo(pendingBefore);
+
+        // 真实批量重放：修复业务后两条死信都应成功重发并迁移 REPLAYED。
+        ALWAYS_FAIL.clear();
+        var outcome = opsEndpoint.replayDeadLettersBatch(EVENT_TYPE, CONSUMER_NAME, 100, false,
+                new org.outboxpro.autoconfigure.OutboxOpsEndpoint.OpsRequest("ops-alice", "batch fix verified"));
+        assertThat(outcome.replayedCount()).as("两条死信应全部重放成功").isGreaterThanOrEqualTo(2);
+        assertThat(outcome.failedCount()).isZero();
+
+        Awaitility.await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
+            String first = jdbc.queryForObject(
+                    "SELECT status FROM outboxpro_dead_letter WHERE event_id = ? AND consumer_name = ?",
+                    String.class, firstEventId, CONSUMER_NAME);
+            String second = jdbc.queryForObject(
+                    "SELECT status FROM outboxpro_dead_letter WHERE event_id = ? AND consumer_name = ?",
+                    String.class, secondEventId, CONSUMER_NAME);
+            assertThat(first).isEqualTo("REPLAYED");
+            assertThat(second).isEqualTo("REPLAYED");
+        });
+    }
+
+    /** 批量重放的未授权调用方在筛选之前被拒绝，台账保持不变。 */
+    @Test
+    void batchReplayRejectsUnauthorizedOperator() {
+        produceDeadLetter(51012L);
+        assertThatThrownBy(() -> opsEndpoint.replayDeadLettersBatch(EVENT_TYPE, CONSUMER_NAME, 100, false,
+                new org.outboxpro.autoconfigure.OutboxOpsEndpoint.OpsRequest("hacker", "batch unauthorized")))
+                .isInstanceOf(SecurityException.class)
+                .hasMessageContaining("not allowed");
+    }
+
+    /** 批量重放受 limit 截断：limit=1 时只处理一条命中记录。 */
+    @Test
+    void batchReplayRespectsLimit() {
+        produceDeadLetter(51013L);
+        produceDeadLetter(51014L);
+        ALWAYS_FAIL.clear();
+
+        var outcome = opsEndpoint.replayDeadLettersBatch(EVENT_TYPE, CONSUMER_NAME, 1, false,
+                new org.outboxpro.autoconfigure.OutboxOpsEndpoint.OpsRequest("ops-alice", "limit drill"));
+        assertThat(outcome.replayedCount()).as("limit=1 时每轮最多重放一条").isLessThanOrEqualTo(1);
     }
 }

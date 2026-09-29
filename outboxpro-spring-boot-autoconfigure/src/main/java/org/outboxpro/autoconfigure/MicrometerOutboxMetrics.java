@@ -80,6 +80,16 @@ public final class MicrometerOutboxMetrics implements OutboxMetrics {
                 Tags.of(Tag.of("event_type", tag(eventType)), Tag.of("consumer", tag(consumer)))).increment();
     }
 
+    @Override
+    public void logSinkDropped(int count) {
+        registry.counter("outboxpro.log.sink.dropped").increment(count);
+    }
+
+    @Override
+    public void logSinkFlushFailed(int count) {
+        registry.counter("outboxpro.log.sink.flush.failed").increment(count);
+    }
+
     /** 生产端指标：标签 event_type + producer。 */
     private io.micrometer.core.instrument.Counter publishCounter(String name, String eventType, String producer) {
         return registry.counter(name,
