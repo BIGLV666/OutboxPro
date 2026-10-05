@@ -20,6 +20,7 @@ public class OutboxProProperties {
     private boolean schemaInitialize = true;
     private Ops ops = new Ops();
     private Retention retention = new Retention();
+    private Metrics metrics = new Metrics();
 
     /** 返回是否启用 OutboxPro 自动装配。 */
     public boolean isEnabled() { return enabled; }
@@ -61,6 +62,65 @@ public class OutboxProProperties {
     public Retention getRetention() { return retention; }
     /** 设置历史数据保留策略配置。 */
     public void setRetention(Retention retention) { this.retention = retention; }
+    /** 返回观测配置。 */
+    public Metrics getMetrics() { return metrics; }
+    /** 设置观测配置。 */
+    public void setMetrics(Metrics metrics) { this.metrics = metrics; }
+
+    /** 积压健康检查与快照指标配置。 */
+    public static class Metrics {
+        /**
+         * 观测快照缓存时长。Gauge 抓取与健康检查共享同一份快照；
+         * 0 表示每次读取都查库，不推荐在生产环境使用。
+         */
+        private Duration snapshotTtl = Duration.ofSeconds(30);
+        /** 健康检查配置。 */
+        private Health health = new Health();
+
+        /** 返回观测快照缓存时长。 */
+        public Duration getSnapshotTtl() { return snapshotTtl; }
+        /** 设置观测快照缓存时长。 */
+        public void setSnapshotTtl(Duration snapshotTtl) { this.snapshotTtl = snapshotTtl; }
+        /** 返回健康检查配置。 */
+        public Health getHealth() { return health; }
+        /** 设置健康检查配置。 */
+        public void setHealth(Health health) { this.health = health; }
+
+        /** Actuator 积压健康检查配置。 */
+        public static class Health {
+            /** 默认开启：只读取共享 TTL 快照，不参与消息主链路。 */
+            private boolean enabled = true;
+            /** Outbox 待处理积压超过该值时健康状态为 OUT_OF_SERVICE。 */
+            private long outboxBacklogThreshold = 1000;
+            /** Outbox 存在至少该数量 DEAD 消息时健康状态为 DOWN。 */
+            private long outboxDeadThreshold = 1;
+            /** 待人工重放死信超过该值时健康状态为 DOWN。 */
+            private long dlqPendingThreshold = 100;
+
+            /** 返回是否启用 OutboxPro 健康检查。 */
+            public boolean isEnabled() { return enabled; }
+            /** 设置是否启用 OutboxPro 健康检查。 */
+            public void setEnabled(boolean enabled) { this.enabled = enabled; }
+            /** 返回 Outbox 待处理积压阈值。 */
+            public long getOutboxBacklogThreshold() { return outboxBacklogThreshold; }
+            /** 设置 Outbox 待处理积压阈值。 */
+            public void setOutboxBacklogThreshold(long outboxBacklogThreshold) {
+                this.outboxBacklogThreshold = outboxBacklogThreshold;
+            }
+            /** 返回 Outbox DEAD 健康阈值。 */
+            public long getOutboxDeadThreshold() { return outboxDeadThreshold; }
+            /** 设置 Outbox DEAD 健康阈值。 */
+            public void setOutboxDeadThreshold(long outboxDeadThreshold) {
+                this.outboxDeadThreshold = outboxDeadThreshold;
+            }
+            /** 返回 DLQ 待重放阈值。 */
+            public long getDlqPendingThreshold() { return dlqPendingThreshold; }
+            /** 设置 DLQ 待重放阈值。 */
+            public void setDlqPendingThreshold(long dlqPendingThreshold) {
+                this.dlqPendingThreshold = dlqPendingThreshold;
+            }
+        }
+    }
 
     /** 运维查询端点配置。 */
     public static class Ops {

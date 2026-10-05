@@ -115,6 +115,14 @@ DDL 文件：
 
 `outboxpro-persistence-mysql/src/main/resources/db/migration/mysql/V1__outboxpro.sql`
 
+死信台账与观测索引：
+
+- `V2__outboxpro_dead_letter.sql`：死信明细与分桶计数表；
+- `V3__outboxpro_dead_letter_raw_payload.sql`：原始载荷列扩容；
+- `V4__outboxpro_dead_letter_dispatch_lease.sql`：分派租约列；
+- `V5__outboxpro_dead_letter_status_reason_index.sql`：待重放原因分布复合索引
+  `(status, reason_code)`。
+
 ### 4.1 表职责
 
 | 表 | 作用 | 是否参与业务事务 |
@@ -317,6 +325,10 @@ DLQ：inventory.queue.dlq
 | `consumer.prefetch` | Rabbit 预取数量 | 过大可能导致 Unacked 堆积 |
 | `retry.max-attempts` | 消费最大次数 | 关键业务谨慎增大，避免长时间阻塞 |
 | `retry.max-delay` | 最大退避时间 | 结合业务时效设置 |
+| `metrics.snapshot-ttl` | 积压观测快照缓存时长 | 建议 15s–60s，过小会把监控抓取频率转成数据库查询频率 |
+| `metrics.health.outbox-backlog-threshold` | PENDING + RETRY_WAITING 健康阈值 | 按业务可接受的投递延迟设置 |
+| `metrics.health.outbox-dead-threshold` | 生产端 DEAD 健康阈值 | 一般保持 1，出现即需要人工介入 |
+| `metrics.health.dlq-pending-threshold` | 待重放死信健康阈值 | 与 `dlq.alert.threshold` 配合设置 |
 
 调优顺序建议：
 
@@ -349,6 +361,18 @@ DLQ：inventory.queue.dlq
 ```
 
 ## 9. 当前已知限制
+
+### 9.1 观测与健康检查（V1.3）
+
+启用 Micrometer 与 Actuator 后交付：
+
+- Outbox 状态积压 Gauge：`outboxpro.outbox.backlog.{pending,processing,retry_waiting,dead}`；
+- DLQ 待重放 Gauge：`outboxpro.dlq.backlog.pending_replay`；
+- DLQ 当前待重放原因分布 Gauge：`outboxpro.dlq.backlog.by_reason`，标签 `reason`；
+- 累计死信原因 Counter：`outboxpro.consume.dead.reason`，标签 `reason`；
+- `OutboxProHealthIndicator`：在 `/actuator/health` 暴露 `outboxPro` 组件；
+- Gauge 与健康检查共享 TTL 快照，避免 Prometheus 抓取与探针频率放大数据库压力；
+- 详细指标说明与处理流程见 [观测与告警 Runbook](OutboxPro-告警Runbook.md)。
 
 P1 已于 2026-08-29 全部收官；V1.1（2026-09-02）交付以下能力，均带 Testcontainers 集成测试：
 

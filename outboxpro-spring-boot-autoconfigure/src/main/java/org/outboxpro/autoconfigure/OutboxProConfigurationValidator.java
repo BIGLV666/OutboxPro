@@ -30,6 +30,7 @@ public final class OutboxProConfigurationValidator {
         validateRetry(properties);
         validateObservability(properties);
         validateRetention(properties);
+        validateMetrics(properties);
     }
 
     /** 校验生产端配置范围。 */
@@ -185,6 +186,32 @@ public final class OutboxProConfigurationValidator {
                 throw new IllegalStateException(
                         "outboxpro.observability.db-sink.flush-interval-milliseconds must be positive");
             }
+        }
+    }
+
+    /** 校验积压观测配置：阈值必须非负，快照 TTL 必须为正，避免健康检查被高频查询拖垮。 */
+    private void validateMetrics(OutboxProProperties properties) {
+        OutboxProProperties.Metrics metrics = properties.getMetrics();
+        if (metrics == null) {
+            throw new IllegalStateException("outboxpro.metrics configuration must not be null");
+        }
+        if (metrics.getSnapshotTtl() == null || metrics.getSnapshotTtl().isNegative()
+                || metrics.getSnapshotTtl().isZero()) {
+            throw new IllegalStateException("outboxpro.metrics.snapshot-ttl must be a positive duration, e.g. 30s");
+        }
+        OutboxProProperties.Metrics.Health health = metrics.getHealth();
+        if (health == null) {
+            throw new IllegalStateException("outboxpro.metrics.health configuration must not be null");
+        }
+        if (health.getOutboxBacklogThreshold() < 0) {
+            throw new IllegalStateException(
+                    "outboxpro.metrics.health.outbox-backlog-threshold must not be negative");
+        }
+        if (health.getOutboxDeadThreshold() < 0) {
+            throw new IllegalStateException("outboxpro.metrics.health.outbox-dead-threshold must not be negative");
+        }
+        if (health.getDlqPendingThreshold() < 0) {
+            throw new IllegalStateException("outboxpro.metrics.health.dlq-pending-threshold must not be negative");
         }
     }
 }

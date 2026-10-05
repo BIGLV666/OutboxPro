@@ -15,7 +15,9 @@ import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 /**
@@ -366,6 +368,34 @@ public class JdbcDeadLetterRepository implements DeadLetterRepository {
         return count == null ? 0L : count;
     }
 
+    /**
+     * 按原因统计当前待人工重放的死信数量。
+     *
+     * <p>查询只命中 {@code PENDING_REPLAY} 状态，并依赖 {@code (status, reason_code)}
+     * 复合索引完成分组；REPLAYED 历史行不会进入扫描范围。返回值补齐全部稳定原因码，
+     * 调用方可直接求和得到当前待重放总量。</p>
+     *
+     * @return 原因码到当前待重放数量的映射
+     */
+    @Override
+    public Map<String, Long> pendingReplayCountByReason() {
+        Map<String, Long> counts = new HashMap<>();
+        for (DeadLetterReasonCode code : DeadLetterReasonCode.values()) {
+            counts.put(code.name(), 0L);
+        }
+        counts.put("UNKNOWN", 0L);
+        jdbc.query("""
+                SELECT reason_code, COUNT(*) AS total
+                FROM outboxpro_dead_letter
+                WHERE status = 'PENDING_REPLAY'
+                GROUP BY reason_code
+                """, resultSet -> {
+            String reason = normalizeReason(resultSet.getString("reason_code"));
+            counts.merge(reason, resultSet.getLong("total"), Long::sum);
+        });
+        return Map.copyOf(counts);
+    }
+
     /** 更新指定计数桶；数据库不存在桶时先创建，避免启动时必须预置固定行。 */
     private void changeCounter(int bucket, int delta) {
         jdbc.update("""
@@ -379,6 +409,18 @@ public class JdbcDeadLetterRepository implements DeadLetterRepository {
     /** 使用稳定的非负哈希把事件分散到计数桶，减少单行写热点。 */
     private int bucket(String eventId) {
         return Math.floorMod(eventId.hashCode(), counterBuckets);
+    }
+
+    /** 将历史或异常数据中的未知原因码收敛到固定 UNKNOWN 标签，避免指标基数失控。 */
+    private String normalizeReason(String reason) {
+        if (reason == null || reason.isBlank()) {
+            return "UNKNOWN";
+        }
+        try {
+            return DeadLetterReasonCode.valueOf(reason).name();
+        } catch (IllegalArgumentException invalid) {
+            return "UNKNOWN";
+        }
     }
 
     /** 将 JDBC 行映射为死信台账记录。 */
@@ -501,5 +543,4 @@ public class JdbcDeadLetterRepository implements DeadLetterRepository {
                 """, Timestamp.from(cutoff), limit);
     }
 }
-
 

@@ -171,6 +171,31 @@ class OutboxProConfigurationValidatorTest {
                 .hasMessageContaining("outboxpro.consumer.max-retry-queue-count");
     }
 
+    /** 观测快照 TTL 不能为 0，避免监控抓取把聚合查询放大成数据库压力。 */
+    @Test
+    void metricsSnapshotTtlMustBePositive() {
+        OutboxProProperties properties = validProperties();
+        properties.getMetrics().setSnapshotTtl(Duration.ZERO);
+        assertThatThrownBy(() -> new OutboxProConfigurationValidator(properties))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("outboxpro.metrics.snapshot-ttl");
+    }
+
+    /** 健康阈值可以为 0，用于用户显式关闭阈值告警语义。 */
+    @Test
+    void metricsThresholdsMayBeZeroButNotNegative() {
+        OutboxProProperties properties = validProperties();
+        properties.getMetrics().getHealth().setOutboxBacklogThreshold(0);
+        properties.getMetrics().getHealth().setOutboxDeadThreshold(0);
+        properties.getMetrics().getHealth().setDlqPendingThreshold(0);
+        assertThatCode(() -> new OutboxProConfigurationValidator(properties)).doesNotThrowAnyException();
+
+        properties.getMetrics().getHealth().setOutboxDeadThreshold(-1);
+        assertThatThrownBy(() -> new OutboxProConfigurationValidator(properties))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("outboxpro.metrics.health.outbox-dead-threshold");
+    }
+
     /** 保留策略各时长必须为正，批大小与单轮上限必须为正。 */
     @Test
     void retentionConfigurationBounds() {

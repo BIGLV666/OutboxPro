@@ -51,6 +51,11 @@ public interface OutboxMetrics {
     /** 消费端失败消息已进入死信流程（重试耗尽 / 不可重试 / 未绑定事件 / 报文损坏）。 */
     default void consumeDead(String eventType, String consumer, String queue) { }
 
+    /** 消费端一条消息已成功进入死信流程，携带框架稳定原因码。 */
+    default void consumeDead(String eventType, String consumer, String queue, String reasonCode) {
+        consumeDead(eventType, consumer, queue);
+    }
+
     /** Inbox 判定重复投递并跳过业务执行。 */
     default void inboxDuplicate(String eventType, String consumer) { }
 }

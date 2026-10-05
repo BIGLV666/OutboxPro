@@ -46,6 +46,7 @@ public final class OutboxProSchemaInitializer {
                 && properties.getDlq().getLedger().isSchemaInitialize()) {
             execute("db/migration/mysql/V2__outboxpro_dead_letter.sql");
             execute("db/migration/mysql/V3__outboxpro_dead_letter_raw_payload.sql");
+            execute("db/migration/mysql/V5__outboxpro_dead_letter_status_reason_index.sql");
             ensureDeadLetterDispatchLeaseColumns();
         }
     }

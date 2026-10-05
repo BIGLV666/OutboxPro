@@ -1,5 +1,6 @@
 package org.outboxpro.persistence.mysql;
 
+import org.outboxpro.spi.persistence.OutboxQuery;
 import org.outboxpro.spi.persistence.OutboxRecord;
 import org.outboxpro.spi.persistence.OutboxRepository;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -10,7 +11,9 @@ import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 /**
@@ -372,6 +375,36 @@ public class JdbcOutboxRepository implements OutboxRepository {
                 WHERE event_id = ? AND status = 'DEAD'
                 """, eventId);
         return updated == 1;
+    }
+
+    /**
+     * 统计当前 Outbox 各状态数量。
+     *
+     * <p>只按状态列分组并补齐全部已知状态，避免监控调用方把缺失键误解为 0 之外的
+     * 其他语义。查询会扫描状态索引并过滤 SENT 终态，成本主要来自待处理状态数量，
+     * 适合由观测快照按 TTL 节流调用。</p>
+     *
+     * @return 全部已知状态到数量的映射
+     */
+    @Override
+    public Map<String, Long> countByStatus() {
+        Map<String, Long> counts = new HashMap<>();
+        for (String status : OutboxQuery.ALLOWED_STATUSES) {
+            counts.put(status, 0L);
+        }
+        jdbc.query("""
+                SELECT status, COUNT(*) AS total
+                FROM outboxpro_outbox
+                WHERE status IN ('PENDING', 'PROCESSING', 'RETRY_WAITING', 'DEAD')
+                GROUP BY status
+                """, resultSet -> {
+            String status = resultSet.getString("status");
+            long total = resultSet.getLong("total");
+            if (OutboxQuery.ALLOWED_STATUSES.contains(status)) {
+                counts.put(status, total);
+            }
+        });
+        return Map.copyOf(counts);
     }
 
     /** 运维检索单页行数上限，防止一次性拉取大结果集。 */

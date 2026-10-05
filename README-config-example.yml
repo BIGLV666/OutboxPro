@@ -23,6 +23,13 @@ outboxpro:
   observability:
     enabled: true
     message-log-enabled: true
+  metrics:
+    snapshot-ttl: 30s
+    health:
+      enabled: true
+      outbox-backlog-threshold: 1000
+      outbox-dead-threshold: 1
+      dlq-pending-threshold: 100
   dlq:
     handling-mode: FRAMEWORK  # FRAMEWORK: 框架发布 RabbitMQ DLQ; CUSTOM: 用户策略完全接管
     ledger:
@@ -38,4 +45,3 @@ outboxpro:
       threshold: 100
       recovery-threshold: 80
       cooldown: 15m
-

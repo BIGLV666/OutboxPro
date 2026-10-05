@@ -2,6 +2,7 @@ package org.outboxpro.spi.deadletter;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 死信台账持久化扩展点。
@@ -152,5 +153,17 @@ public interface DeadLetterRepository {
      */
     default int purgeReplayedBefore(Instant cutoff, int limit) {
         return 0;
+    }
+
+    /**
+     * 按死信原因统计当前待重放积压。
+     *
+     * <p>实现应返回覆盖全部已知原因码的计数，包括数量为 0 的原因；
+     * 调用方据此既能得到分布，也能通过求和得到总积压。</p>
+     *
+     * @return 原因码到 PENDING_REPLAY 数量的映射；不支持统计的实现返回空 Map
+     */
+    default Map<String, Long> pendingReplayCountByReason() {
+        return Map.of();
     }
 }

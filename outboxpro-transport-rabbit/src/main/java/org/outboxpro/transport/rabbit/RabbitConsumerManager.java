@@ -15,6 +15,7 @@ import org.outboxpro.spi.observability.MessageLogSink;
 import org.outboxpro.spi.observability.MessageStage;
 import org.outboxpro.spi.observability.MessageStatus;
 import org.outboxpro.spi.observability.MessageTraceRecord;
+import org.outboxpro.spi.deadletter.DeadLetterReasonCode;
 import org.outboxpro.spi.persistence.InboxRecord;
 import org.outboxpro.spi.persistence.InboxRepository;
 import org.springframework.amqp.core.AcknowledgeMode;
@@ -160,7 +161,8 @@ public final class RabbitConsumerManager implements AutoCloseable {
             // 缺失 eventId 时使用消息 ID 或内容哈希，确保重复投递仍能落到同一条死信台账。
             String fallbackEventId = fallbackEventId(message);
             // 事件类型不可知，标签统一记 unknown，防止外部输入污染指标基数。
-            metrics.consumeDead("unknown", subscription.getConsumerName(), subscription.getQueue());
+            metrics.consumeDead("unknown", subscription.getConsumerName(), subscription.getQueue(),
+                    DeadLetterReasonCode.MALFORMED_MESSAGE.name());
             try {
                 deadLetterCoordinator.handle(subscription, null, payloadJson, fallbackEventId, null,
                         receivedRoutingKey, attempt,
@@ -183,7 +185,8 @@ public final class RabbitConsumerManager implements AutoCloseable {
         // 当前 Queue 不订阅这个 eventType，继续重试没有意义，通过死信协调器处理。
         if (binding == null) {
             // 未绑定的事件类型可能是外部注入的任意字符串，指标标签统一记 unknown。
-            metrics.consumeDead("unknown", subscription.getConsumerName(), subscription.getQueue());
+            metrics.consumeDead("unknown", subscription.getConsumerName(), subscription.getQueue(),
+                    DeadLetterReasonCode.UNKNOWN_EVENT_TYPE.name());
             try {
                 deadLetterCoordinator.handle(subscription, null, payloadJson, stableEventId, eventType,
                         receivedRoutingKey, attempt, null,
@@ -316,7 +319,10 @@ public final class RabbitConsumerManager implements AutoCloseable {
                 deadLetterCoordinator.handle(subscription, binding, payloadJson, eventId, eventType, receivedRoutingKey,
                         attempt, error, RabbitTopologyManager.deadExchange(subscription));
                 channel.basicAck(deliveryTag, false);
-                metrics.consumeDead(eventType, subscription.getConsumerName(), subscription.getQueue());
+                metrics.consumeDead(eventType, subscription.getConsumerName(), subscription.getQueue(),
+                        binding.retryPolicy().enabled() && attempt >= binding.retryPolicy().maxAttempts()
+                                ? DeadLetterReasonCode.RETRY_EXHAUSTED.name()
+                                : DeadLetterReasonCode.NON_RETRYABLE_EXCEPTION.name());
                 log(eventId, eventType, subscription, MessageStatus.DEAD, attempt, startedNanos, error);
             }
         } catch (RuntimeException republishError) {

@@ -2,6 +2,7 @@ package org.outboxpro.spi.persistence;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Outbox 持久化扩展点，认领操作必须具备多实例并发安全性。
@@ -135,5 +136,17 @@ public interface OutboxRepository {
      */
     default boolean resetDeadForReplay(String eventId) {
         return false;
+    }
+
+    /**
+     * 统计当前 Outbox 各状态的消息数量，供健康检查与积压 Gauge 使用。
+     *
+     * <p>实现应优先返回覆盖全部已知状态的计数，包括数量为 0 的状态；
+     * 这样调用方能区分“表中没有消息”和“当前实现不支持统计”。</p>
+     *
+     * @return 状态到数量的映射；不支持统计的实现返回空 Map
+     */
+    default Map<String, Long> countByStatus() {
+        return Map.of();
     }
 }

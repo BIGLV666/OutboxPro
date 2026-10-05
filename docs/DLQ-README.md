@@ -304,6 +304,8 @@ CREATE TABLE outboxpro_dead_letter_counter (
 3. **死信原因分布**：按 `reason_code` 分组统计
 4. **重放成功率**：成功重放 / 总重放次数
 5. **告警触发频率**：高位告警与恢复通知次数
+6. **当前待重放原因分布**：`outboxpro.dlq.backlog.by_reason`，标签 `reason`
+7. **累计死信原因分布**：`outboxpro.consume.dead.reason`，标签 `reason`
 
 ## 常见问题
 
@@ -328,6 +330,14 @@ A:
 A: 不需要。CUSTOM 模式下，用户策略完全接管死信发布，可以转发到任何目标系统。
 
 ## 迁移指南
+
+### 升级到包含观测增强的版本
+
+1. 执行 `V5__outboxpro_dead_letter_status_reason_index.sql`，为待重放原因分布查询创建
+   `(status, reason_code)` 复合索引；
+2. 如使用 `outboxpro.schema-initialize=true`，框架启动时会自动检测并补建该索引；
+3. 配置 `outboxpro.metrics.snapshot-ttl` 与 `outboxpro.metrics.health.*`；
+4. 指标清单与告警处理见 [观测与告警 Runbook](OutboxPro-告警Runbook.md)。
 
 ### 从无 DLQ 功能迁移
 

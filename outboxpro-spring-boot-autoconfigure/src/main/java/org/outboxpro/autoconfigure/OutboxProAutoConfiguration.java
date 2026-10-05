@@ -132,7 +132,9 @@ public class OutboxProAutoConfiguration {
     OutboxMetrics outboxProMetrics(ObjectProvider<io.micrometer.core.instrument.MeterRegistry> meterRegistry) {
         io.micrometer.core.instrument.MeterRegistry registry = meterRegistry.getIfAvailable();
         return registry == null ? OutboxMetrics.NOOP : new MicrometerOutboxMetrics(registry);
-    }    /** 将配置属性转换为运行时重试策略。 */
+    }
+
+    /** 将配置属性转换为运行时重试策略。 */
     @Bean
     @ConditionalOnMissingBean
     RetryPolicy outboxProRetryPolicy(OutboxProProperties properties) {
@@ -181,6 +183,47 @@ public class OutboxProAutoConfiguration {
     @ConditionalOnMissingBean
     DeadLetterRepository outboxProDeadLetterRepository(JdbcTemplate jdbcTemplate, OutboxProProperties properties) {
         return new JdbcDeadLetterRepository(jdbcTemplate, properties.getDlq().getLedger().getCounterBuckets());
+    }
+
+    /**
+     * 共享积压快照：Micrometer Gauge 与健康检查只从这里读取。
+     * 通过 TTL 限制数据库聚合查询频率，避免多个监控调用方放大数据库压力。
+     */
+    @Bean
+    @ConditionalOnBean(OutboxRepository.class)
+    @ConditionalOnMissingBean
+    OutboxProObservabilitySnapshot outboxProObservabilitySnapshot(
+            OutboxRepository outboxRepository,
+            ObjectProvider<DeadLetterRepository> deadLetterRepository,
+            OutboxProProperties properties) {
+        return new OutboxProObservabilitySnapshot(outboxRepository,
+                deadLetterRepository.getIfAvailable(), properties.getMetrics().getSnapshotTtl());
+    }
+
+    /** 注册 Outbox / DLQ 当前积压 Gauge；只读取共享快照，不新增后台查询任务。 */
+    @Bean
+    @ConditionalOnBean({OutboxProObservabilitySnapshot.class, io.micrometer.core.instrument.MeterRegistry.class})
+    @ConditionalOnMissingBean
+    MicrometerOutboxProBacklogMetrics outboxProBacklogMetrics(
+            OutboxProObservabilitySnapshot snapshot,
+            ObjectProvider<io.micrometer.core.instrument.MeterRegistry> meterRegistry) {
+        io.micrometer.core.instrument.MeterRegistry registry = meterRegistry.getIfAvailable();
+        if (registry == null) {
+            throw new IllegalStateException("MeterRegistry was required by conditional bean but is missing");
+        }
+        return new MicrometerOutboxProBacklogMetrics(snapshot, registry);
+    }
+
+    /** OutboxPro 积压健康检查；默认开启，可由 outboxpro.metrics.health.enabled=false 关闭。 */
+    @Bean
+    @ConditionalOnClass(name = "org.springframework.boot.actuate.health.HealthIndicator")
+    @ConditionalOnBean(OutboxProObservabilitySnapshot.class)
+    @ConditionalOnProperty(prefix = "outboxpro.metrics.health", name = "enabled",
+            havingValue = "true", matchIfMissing = true)
+    @ConditionalOnMissingBean
+    OutboxProHealthIndicator outboxProHealthIndicator(OutboxProObservabilitySnapshot snapshot,
+                                                       OutboxProProperties properties) {
+        return new OutboxProHealthIndicator(snapshot, properties.getMetrics().getHealth());
     }
 
     /**
@@ -483,8 +526,3 @@ public class OutboxProAutoConfiguration {
                 authorizer.getIfAvailable(() -> defaultDeny), retentionTask, deadLetterReplayEndpoint);
     }
 }
-
-
-
-
-

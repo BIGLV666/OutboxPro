@@ -9,6 +9,7 @@ OutboxPro 是面向 Spring Boot 的事务消息与 RabbitMQ 操作简化组件�
 - [快速开始与公共 API](docs/OutboxPro-快速开始与公共API.md)
 - [V1 维护手册](docs/OutboxPro-维护手册.md)
 - [死信队列 (DLQ) 功能](docs/DLQ-README.md)
+- [观测与告警 Runbook](docs/OutboxPro-告警Runbook.md)
 - [示例应用：10 分钟跑通全流程](outboxpro-example-order/README.md)
 
 ## 模块
@@ -69,7 +70,9 @@ outboxpro:
 
 默认启动时执行 `CREATE TABLE IF NOT EXISTS`。生产环境可设置 `outboxpro.schema-initialize=false`，改由 Flyway、Liquibase 或 DBA 执行：
 
-`outboxpro-persistence-mysql/src/main/resources/db/migration/mysql/V1__outboxpro.sql`
+`outboxpro-persistence-mysql/src/main/resources/db/migration/mysql/`
+
+该目录包含基础表、死信台账与观测索引的 `V1`–`V5` 迁移脚本。
 
 ## 声明生产事件
 
@@ -155,6 +158,25 @@ outboxpro:
 以及生产端 DEAD 消息重放（`POST /outbox/{eventId}/replay`）。鉴权复用 `DlqReplayAuthorizer` SPI，
 未配置授权器时默认拒绝；详见 [DLQ 功能文档](docs/DLQ-README.md)。
 
+## 积压观测与健康检查（V1.3）
+
+启用 Micrometer 与 Actuator 后，框架会暴露 Outbox / DLQ 当前积压 Gauge、
+死信原因分布指标，并在 `/actuator/health` 中提供 OutboxPro 健康状态：
+
+```yaml
+outboxpro:
+  metrics:
+    snapshot-ttl: 30s
+    health:
+      enabled: true
+      outbox-backlog-threshold: 1000
+      outbox-dead-threshold: 1
+      dlq-pending-threshold: 100
+```
+
+Gauge 与健康检查共享同一份 TTL 快照，避免监控抓取频率放大数据库压力。
+指标清单与告警处理流程见 [观测与告警 Runbook](docs/OutboxPro-告警Runbook.md)。
+
 ## 可靠性语义
 
 - 生产端：至少一次投递。
@@ -181,5 +203,3 @@ Sources/Javadoc Jar、GPG 签名和 `central-publishing-maven-plugin` 聚合发�
 1. 在 `~/.m2/settings.xml` 配置 `<server><id>central</id>` 的用户名与密码（Central 生成的 token）；
 2. 本地导入 GPG 私钥；
 3. 将版本号中的 `-SNAPSHOT` 去掉后执行 `mvn -Prelease clean deploy`。
-
-

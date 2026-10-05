@@ -18,6 +18,7 @@ import org.outboxpro.core.metrics.OutboxMetrics;
  *   <li>outboxpro.consume.total / consume.success / consume.failure / consume.retry / consume.dead
  *       （标签 event_type、consumer、queue）</li>
  *   <li>outboxpro.inbox.duplicate（标签 event_type、consumer）</li>
+ *   <li>outboxpro.consume.dead.reason（标签 event_type、consumer、queue、reason）</li>
  * </ul>
  */
 public final class MicrometerOutboxMetrics implements OutboxMetrics {
@@ -75,6 +76,16 @@ public final class MicrometerOutboxMetrics implements OutboxMetrics {
     }
 
     @Override
+    public void consumeDead(String eventType, String consumer, String queue, String reasonCode) {
+        // 同时维护旧指标与带 reason 的新指标：旧监控序列不断，原因分布又可单独查询。
+        consumeCounter("outboxpro.consume.dead", eventType, consumer, queue).increment();
+        registry.counter("outboxpro.consume.dead.reason",
+                Tags.of(Tag.of("event_type", tag(eventType)), Tag.of("consumer", tag(consumer)),
+                        Tag.of("queue", tag(queue)), Tag.of("reason", reasonCode(tag(reasonCode)))))
+                .increment();
+    }
+
+    @Override
     public void inboxDuplicate(String eventType, String consumer) {
         registry.counter("outboxpro.inbox.duplicate",
                 Tags.of(Tag.of("event_type", tag(eventType)), Tag.of("consumer", tag(consumer)))).increment();
@@ -108,5 +119,14 @@ public final class MicrometerOutboxMetrics implements OutboxMetrics {
     /** 标签值规范化：空值记 unknown，保证基数有界。 */
     private static String tag(String value) {
         return value == null || value.isBlank() ? "unknown" : value;
+    }
+
+    /** 原因码必须是稳定枚举；历史异常值统一收敛为 unknown，避免标签基数失控。 */
+    private static String reasonCode(String value) {
+        try {
+            return org.outboxpro.spi.deadletter.DeadLetterReasonCode.valueOf(value).name();
+        } catch (RuntimeException invalid) {
+            return "unknown";
+        }
     }
 }
