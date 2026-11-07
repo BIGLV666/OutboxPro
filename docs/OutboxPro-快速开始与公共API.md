@@ -74,7 +74,7 @@ String eventId = envelope.getEventId();
 </dependency>
 ```
 
-1.4.0 发布到 Maven Central 后，直接依赖即可使用；当前源码版本可通过
+1.4.0 已发布到 Maven Central，直接依赖即可使用；如需基于当前源码构建，可执行
 `mvn install -DskipTests` 安装到本地仓库后引用。
 
 ### 3.2 application.yml
