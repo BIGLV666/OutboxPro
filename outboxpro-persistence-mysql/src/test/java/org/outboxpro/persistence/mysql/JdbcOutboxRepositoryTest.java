@@ -57,5 +57,7 @@ class JdbcOutboxRepositoryTest {
         verify(jdbc).queryForObject(sql.capture(), eq(Long.class), any(Object[].class));
         assertTrue(sql.getValue().contains("'PENDING'"));
         assertTrue(sql.getValue().contains("'RETRY_WAITING'"));
+        assertTrue(sql.getValue().contains("next_retry_time"),
+                "未到期的重试不应计入积压年龄");
     }
 }

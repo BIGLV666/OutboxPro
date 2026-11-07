@@ -59,7 +59,10 @@ public abstract class AbstractOutboxProIntegrationTest {
         registry.add("spring.rabbitmq.password", () -> rabbit().getAdminPassword());
         // 单例 MySQL 容器被所有 Spring 上下文共享；限制每个上下文的连接池大小，
         // 避免上下文数量增长后触发 MySQL "Too many connections"。
-        registry.add("spring.datasource.hikari.maximum-pool-size", () -> "3");
+        // 默认 3 个连接足以覆盖常规集成测试；性能测试可通过系统属性临时放大，
+        // 避免多 worker 场景因连接池不足被人为限速。
+        registry.add("spring.datasource.hikari.maximum-pool-size",
+                () -> System.getProperty("outboxpro.test.pool-size", "3"));
         registry.add("spring.datasource.hikari.minimum-idle", () -> "1");
     }
 

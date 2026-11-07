@@ -76,7 +76,7 @@ outboxpro:
 
 `outboxpro-persistence-mysql/src/main/resources/db/migration/mysql/`
 
-该目录包含基础表、死信台账与观测索引的 `V1`–`V5` 迁移脚本。
+该目录包含基础表、死信台账与观测索引的 `V1`–`V6` 迁移脚本。
 
 ## 声明生产事件
 
@@ -199,6 +199,8 @@ outboxpro:
 - `workers` 线程共享同一个 `OutboxRelay` 与连接池；每个 worker 至少需要 1 个数据库连接，
   建议连接池大小不低于 `workers + 1`。
 - 空轮时轮询间隔按 1s → 2s → 4s → 5s 退避；一旦认领到消息立即恢复 `poll-interval`。
+  系统完全空闲后到达的首条消息最坏等待 `idle-backoff-max`；延迟敏感场景可设小或
+  设为与 `poll-interval` 相同。
 - V1.4 新增发布/消费耗时 Timer、Confirm 超时 Counter 与 Relay 单轮耗时 Timer，
   详见 Runbook。
 - 同一机器上的吞吐基线与调优建议见 [Relay 性能基线](docs/性能基线.md)。

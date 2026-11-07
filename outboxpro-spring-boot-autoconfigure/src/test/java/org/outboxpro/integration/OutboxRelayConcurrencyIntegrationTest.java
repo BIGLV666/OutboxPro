@@ -118,6 +118,8 @@ class OutboxRelayConcurrencyIntegrationTest extends AbstractOutboxProIntegration
         amqpAdmin.declareQueue(queue);
         amqpAdmin.declareBinding(binding);
         amqpAdmin.declareBinding(BindingBuilder.bind(queue).to(exchange).with(BULK_EVENT_TYPE));
+        // 两个用例共用队列，先清空避免上一个用例的残留影响“消息总数”断言。
+        amqpAdmin.purgeQueue(QUEUE);
     }
 
     /** T9：两个 Relay 实例并发认领同一批消息，最终每条消息恰好投递一次。 */
@@ -170,10 +172,13 @@ class OutboxRelayConcurrencyIntegrationTest extends AbstractOutboxProIntegration
 
         // 队列：正好 10 条且 eventId 互不重复
         Set<String> deliveredEventIds = new java.util.HashSet<>();
+        int deliveredCount = 0;
         org.springframework.amqp.core.Message message;
         while ((message = rabbitTemplate.receive(QUEUE, Duration.ofSeconds(2).toMillis())) != null) {
             deliveredEventIds.add((String) message.getMessageProperties().getHeader("x-outboxpro-event-id"));
+            deliveredCount++;
         }
+        assertThat(deliveredCount).as("每条消息只能投递一次").isEqualTo(EVENT_COUNT);
         assertThat(deliveredEventIds).hasSize(EVENT_COUNT).containsAll(eventIds);
     }
 
@@ -207,10 +212,15 @@ class OutboxRelayConcurrencyIntegrationTest extends AbstractOutboxProIntegration
         }
 
         Set<String> delivered = new java.util.HashSet<>();
+        int deliveredCount = 0;
         org.springframework.amqp.core.Message message;
         while ((message = rabbitTemplate.receive(QUEUE, Duration.ofSeconds(2).toMillis())) != null) {
             delivered.add((String) message.getMessageProperties().getHeader("x-outboxpro-event-id"));
+            deliveredCount++;
         }
+        assertThat(deliveredCount)
+                .as("重复投递会被 Set 去重，必须单独断言消息总数")
+                .isEqualTo(eventIds.size());
         assertThat(delivered).containsExactlyInAnyOrderElementsOf(eventIds);
     }
 

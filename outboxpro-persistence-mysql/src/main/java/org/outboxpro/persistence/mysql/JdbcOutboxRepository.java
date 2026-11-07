@@ -420,17 +420,22 @@ public class JdbcOutboxRepository implements OutboxRepository {
     /**
      * 查询最早待投递消息的等待秒数。
      *
-     * <p>只聚合 PENDING 与 RETRY_WAITING，命中 {@code idx_outbox_pending}；
+     * <p>只聚合真正可投递的记录：PENDING，以及 {@code next_retry_time} 已到期的
+     * RETRY_WAITING。尚未到期的重试处于正常退避中，不应计入“积压年龄”，否则
+     * 正常重试周期会持续触发年龄告警。命中 {@code idx_outbox_status_created}；
      * 没有待投递消息时 {@code MIN(created_time)} 为 NULL，统一返回 0，
      * 与“实现不支持”返回 {@code null} 区分。</p>
      */
     @Override
     public Long oldestPendingAgeSeconds(Instant now) {
+        Timestamp timestamp = Timestamp.from(now);
         Long ageSeconds = jdbc.queryForObject("""
                 SELECT COALESCE(TIMESTAMPDIFF(SECOND, MIN(created_time), ?), 0)
                 FROM outboxpro_outbox
-                WHERE status IN ('PENDING', 'RETRY_WAITING')
-                """, Long.class, Timestamp.from(now));
+                WHERE status = 'PENDING'
+                   OR (status = 'RETRY_WAITING'
+                       AND (next_retry_time IS NULL OR next_retry_time <= ?))
+                """, Long.class, timestamp, timestamp);
         return ageSeconds == null ? 0L : Math.max(0L, ageSeconds);
     }
 

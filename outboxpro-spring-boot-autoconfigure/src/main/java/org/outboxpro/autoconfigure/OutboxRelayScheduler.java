@@ -5,8 +5,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
-import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -64,11 +64,17 @@ public final class OutboxRelayScheduler {
         if (pollInterval == null || pollInterval.isNegative() || pollInterval.isZero()) {
             throw new IllegalArgumentException("pollInterval must be positive");
         }
+        Duration requestedMax = maxIdleInterval == null || maxIdleInterval.isNegative()
+                ? pollInterval : maxIdleInterval;
+        // 过期租约恢复发生在 Relay 轮询内；空闲退避若超过半个租约周期，崩溃实例
+        // 遗留的 PROCESSING 记录会被推迟恢复。这里对退避上限做租约约束。
+        long leaseBoundMillis = Math.max(1_000L, relay.claimTimeout().toMillis() / 2);
+        long effectiveMaxMillis = Math.max(pollInterval.toMillis(),
+                Math.min(requestedMax.toMillis(), leaseBoundMillis));
         this.relay = relay;
         this.workers = workers;
         this.pollInterval = pollInterval;
-        this.maxIdleInterval = maxIdleInterval == null || maxIdleInterval.isNegative()
-                ? pollInterval : maxIdleInterval;
+        this.maxIdleInterval = Duration.ofMillis(effectiveMaxMillis);
     }
 
     /**
@@ -83,7 +89,11 @@ public final class OutboxRelayScheduler {
             thread.setDaemon(true);
             return thread;
         };
-        ScheduledExecutorService created = Executors.newScheduledThreadPool(workers, threadFactory);
+        ScheduledThreadPoolExecutor created = new ScheduledThreadPoolExecutor(workers, threadFactory);
+        // shutdown 时取消尚未到期的延迟任务，避免 stop() 等待一个完整退避周期后
+        // 再 shutdownNow() 中断正在发布的一轮。
+        created.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
+        created.setContinueExistingPeriodicTasksAfterShutdownPolicy(false);
         executor = created;
         for (int i = 0; i < workers; i++) {
             schedule(new Worker());

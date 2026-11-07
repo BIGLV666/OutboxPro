@@ -12,6 +12,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * RabbitMQ 发布器，等待 Publisher Confirm 后才向 Relay 返回成功。
@@ -117,7 +118,16 @@ public final class RabbitMessagePublisher implements MessagePublisher {
                 // 发送阶段失败（连接断开、转换异常等）的记录无需等待 Confirm。
                 sendError = error;
             }
-            pending.add(new PendingConfirm(record, sendError == null ? correlation : null, sendError, startedNanos));
+            PendingConfirm item = new PendingConfirm(record, sendError == null ? correlation : null,
+                    sendError, startedNanos, new AtomicBoolean());
+            if (sendError != null) {
+                recordPublishDuration(item);
+            } else {
+                // 以 Confirm 实际完成时刻计时，避免按批内顺序逐条等待时，
+                // 前面记录的 Confirm 等待被算进后面记录的发布耗时。
+                correlation.getFuture().whenComplete((confirm, error) -> recordPublishDuration(item));
+            }
+            pending.add(item);
         }
 
         List<PublishOutcome> outcomes = new ArrayList<>(pending.size());
@@ -134,11 +144,20 @@ public final class RabbitMessagePublisher implements MessagePublisher {
                     outcomes.add(PublishOutcome.failed(error));
                 }
             } finally {
-                metrics.publishDuration(item.record.eventType(), item.record.producer(),
-                        Duration.ofNanos(System.nanoTime() - item.startedNanos));
+                // 超时或 Confirm 尚未完成时由这里兜底记录；正常 Confirm 已由回调记录，
+                // AtomicBoolean 保证每条记录只产生一个耗时样本。
+                recordPublishDuration(item);
             }
         }
         return outcomes;
+    }
+
+    /** 每条记录只记录一次发布耗时；回调线程与 Relay 线程可能并发调用。 */
+    private void recordPublishDuration(PendingConfirm item) {
+        if (item.durationRecorded().compareAndSet(false, true)) {
+            metrics.publishDuration(item.record().eventType(), item.record().producer(),
+                    Duration.ofNanos(System.nanoTime() - item.startedNanos()));
+        }
     }
 
     /** 等待单条 Publisher Confirm；超时、NACK 或中断都转换为带 eventId 的运行时异常。 */
@@ -163,7 +182,7 @@ public final class RabbitMessagePublisher implements MessagePublisher {
         }
     }
 
-    /** 批量发布过程中一条记录的等待状态：记录、Confirm 句柄、发送阶段异常与起始时间。 */
+    /** 批量发布过程中一条记录的等待状态：记录、Confirm 句柄、发送阶段异常、起始时间与耗时去重标记。 */
     private record PendingConfirm(OutboxRecord record, CorrelationData correlation, RuntimeException sendError,
-                                  long startedNanos) { }
+                                  long startedNanos, AtomicBoolean durationRecorded) { }
 }

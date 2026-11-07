@@ -40,6 +40,9 @@ public final class OutboxProSchemaInitializer {
         }
 
         execute("db/migration/mysql/V1__outboxpro.sql");
+        // 老库的 outboxpro_outbox 已存在时 CREATE TABLE IF NOT EXISTS 不会补新索引，
+        // 这里按 information_schema 幂等补齐最老积压年龄聚合所需的覆盖索引。
+        ensureOutboxStatusCreatedIndex();
 
         // 只有台账开启且允许自动建表时才创建死信明细和计数桶表。
         if (properties.getDlq().getLedger().isEnabled()
@@ -51,6 +54,37 @@ public final class OutboxProSchemaInitializer {
         }
     }
 
+
+    /**
+     * 为最老积压年龄聚合补齐 {@code (status, created_time)} 索引。
+     *
+     * <p>升级库的 Outbox 表已存在，基础的 {@code CREATE TABLE IF NOT EXISTS} 不会新增索引；
+     * 多实例同时启动时可能并发执行 ALTER，失败后重新检查即可确认是否已由其他实例创建。</p>
+     */
+    private void ensureOutboxStatusCreatedIndex() {
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        if (outboxStatusCreatedIndexExists(jdbc)) {
+            return;
+        }
+        try {
+            jdbc.execute("ALTER TABLE outboxpro_outbox "
+                    + "ADD KEY idx_outbox_status_created (status, created_time)");
+        } catch (DataAccessException error) {
+            if (!outboxStatusCreatedIndexExists(jdbc)) {
+                throw error;
+            }
+        }
+    }
+
+    private boolean outboxStatusCreatedIndexExists(JdbcTemplate jdbc) {
+        Integer count = jdbc.queryForObject("""
+                SELECT COUNT(*) FROM information_schema.statistics
+                WHERE table_schema = DATABASE()
+                  AND table_name = 'outboxpro_outbox'
+                  AND index_name = 'idx_outbox_status_created'
+                """, Integer.class);
+        return count != null && count > 0;
+    }
 
     /**
      * 按列检查并补齐死信分派租约字段。

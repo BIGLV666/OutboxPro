@@ -121,7 +121,9 @@ DDL 文件：
 - `V3__outboxpro_dead_letter_raw_payload.sql`：原始载荷列扩容；
 - `V4__outboxpro_dead_letter_dispatch_lease.sql`：分派租约列；
 - `V5__outboxpro_dead_letter_status_reason_index.sql`：待重放原因分布复合索引
-  `(status, reason_code)`。
+  `(status, reason_code)`；
+- `V6__outboxpro_status_created_index.sql`：最老积压年龄聚合索引
+  `(status, created_time)`（V1.4）。
 
 ### 4.1 表职责
 
@@ -320,7 +322,7 @@ DLQ：inventory.queue.dlq
 | `producer.batch-size` | Relay 单次认领量 | 先从 100 开始，观察数据库锁和 MQ 吞吐；上限 10000，建议 100–500 |
 | `producer.workers` | 单实例 Relay 工作线程数 | 建议 2–4；连接池至少 `workers + 1`，受 Broker Confirm 吞吐约束 |
 | `producer.poll-interval` | Relay 轮询间隔 | 延迟敏感场景降低，数据库压力高时提高 |
-| `producer.idle-backoff-max` | 空轮指数退避上限 | 低流量场景建议 5s–30s；有消息时立即恢复基础间隔 |
+| `producer.idle-backoff-max` | 空轮指数退避上限 | 低流量场景建议 5s–30s；有消息时恢复基础间隔，但完全空闲后的首条消息最坏等待该值（受半个 `claim-timeout` 约束） |
 | `producer.claim-timeout` | Outbox 认领租约 | 应大于正常发布耗时，避免重复认领 |
 | `producer.confirm-timeout` | Publisher Confirm 超时 | 应覆盖网络抖动，但不能无限等待 |
 | `consumer.concurrency` | Rabbit 消费并发 | 受 Handler CPU、数据库连接池和下游限流约束 |
@@ -338,9 +340,9 @@ DLQ：inventory.queue.dlq
 先确认数据库连接池 → 再调整 Relay workers/batch → 再调整消费者并发 → 最后调整 prefetch
 ```
 
-Relay 侧容量基线（2000 条记录、真实 MySQL、零延迟 Publisher）：
-单 worker + batch 500 约 950–1000 records/s；2 worker 约 1900 records/s；
-4 worker 约 2200 records/s。完整方法与解读见 [性能基线](性能基线.md)。
+Relay 侧容量基线（2000 条记录、真实 MySQL、零延迟 Publisher、8 连接池）：
+单 worker + batch 500 约 960–1040 records/s；2 worker 约 1900 records/s；
+4 worker 约 2800 records/s。完整方法与解读见 [性能基线](性能基线.md)。
 若吞吐接近 `records / claim-timeout`，优先排查锁等待或 worker 异常，而不是继续加线程。
 
 ## 8. 发布和版本维护
@@ -427,8 +429,9 @@ V1.4 在保持默认行为不变的前提下交付：
 - `producer.idle-backoff-max`：连续空轮指数退避，认领到消息立即恢复基础间隔；
 - 新增指标：`outboxpro.publish.duration`、`outboxpro.publish.confirm.timeout`、
   `outboxpro.relay.cycle.duration`、`outboxpro.consume.duration`；
-- `outboxpro.outbox.oldest_pending_age`：最老 PENDING/RETRY_WAITING 消息年龄（秒），
-  健康检查详情字段 `outboxOldestPendingAgeSeconds`；
+- `outboxpro.outbox.oldest_pending_age`：最老可投递消息年龄（秒），只统计 PENDING
+  与已到 `next_retry_time` 的 RETRY_WAITING；健康检查详情字段
+  `outboxOldestPendingAgeSeconds`；
 - 过期认领恢复按半个租约周期节流；认领与恢复事务使用 `READ_COMMITTED`，
   避免 MySQL 间隙锁导致的并发认领阻塞；
 - 性能基线与复现方式见 [性能基线](性能基线.md)。

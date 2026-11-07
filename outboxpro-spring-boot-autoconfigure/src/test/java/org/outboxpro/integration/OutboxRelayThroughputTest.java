@@ -3,6 +3,7 @@ package org.outboxpro.integration;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
+import org.outboxpro.autoconfigure.OutboxRelayScheduler;
 import org.outboxpro.core.retry.RetryPolicy;
 import org.outboxpro.persistence.OutboxRelay;
 import org.outboxpro.spi.persistence.OutboxRecord;
@@ -18,12 +19,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import java.time.Duration;
 import java.util.List;
 import java.util.UUID;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.IntStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -48,12 +44,18 @@ import static org.assertj.core.api.Assertions.assertThat;
         })
 class OutboxRelayThroughputTest extends AbstractOutboxProIntegrationTest {
 
+    static {
+        // 4 个 worker 需要并行持有连接；默认测试连接池 3 会人为压低多 worker 结果。
+        System.setProperty("outboxpro.test.pool-size", "8");
+    }
+
     @DynamicPropertySource
     static void database(DynamicPropertyRegistry registry) {
         registerIsolatedDatabase(registry, "throughput");
     }
 
     private static final int RECORD_COUNT = 2_000;
+    private static final long DRAIN_TIMEOUT_SECONDS = 60;
 
     @Autowired
     JdbcTemplate jdbc;
@@ -64,102 +66,47 @@ class OutboxRelayThroughputTest extends AbstractOutboxProIntegrationTest {
     @Test
     void relayThroughputBaseline() {
         for (int batchSize : new int[]{100, 500}) {
-            jdbc.update("DELETE FROM outboxpro_outbox");
-            preload(RECORD_COUNT);
-
-            OutboxRelay relay = new OutboxRelay(outboxRepository, new NoopPublisher(),
-                    RetryPolicy.defaults(), batchSize, Duration.ofSeconds(30));
-
-            long started = System.nanoTime();
-            int cycles = 0;
-            while (cycles++ < 10_000) {
-                if (!relay.relayOnceAndReportActivity()) {
-                    break;
-                }
-            }
-            long elapsedMillis = (System.nanoTime() - started) / 1_000_000;
-
-            Integer sent = jdbc.queryForObject(
-                    "SELECT COUNT(*) FROM outboxpro_outbox WHERE status = 'SENT'", Integer.class);
-            assertThat(sent).as("batchSize=%d 时应全部投递", batchSize).isEqualTo(RECORD_COUNT);
-
-            double recordsPerSecond = RECORD_COUNT * 1000.0 / Math.max(1, elapsedMillis);
-            System.out.printf("OutboxRelay baseline: workers=1, batchSize=%d, records=%d, elapsed=%dms, throughput=%.0f records/s%n",
-                    batchSize, RECORD_COUNT, elapsedMillis, recordsPerSecond);
+            measured("workers=1", batchSize, 1, batchSize);
         }
-
         for (int workers : new int[]{1, 2, 4}) {
-            jdbc.update("DELETE FROM outboxpro_outbox");
-            preload(RECORD_COUNT);
-            long elapsedMillis = drainWithWorkers(workers, 500);
-            double recordsPerSecond = RECORD_COUNT * 1000.0 / Math.max(1, elapsedMillis);
-            System.out.printf("OutboxRelay baseline: workers=%d, batchSize=500, records=%d, elapsed=%dms, throughput=%.0f records/s%n",
-                    workers, RECORD_COUNT, elapsedMillis, recordsPerSecond);
+            measured("workers=" + workers, 500, workers, 500);
         }
     }
 
-    /** 启动 N 个独立 Relay 并发认领，直到全部记录 SENT。 */
-    private long drainWithWorkers(int workerCount, int batchSize) {
-        List<OutboxRelay> relays = IntStream.range(0, workerCount)
-                .mapToObj(ignored -> new OutboxRelay(outboxRepository, new NoopPublisher(),
-                        RetryPolicy.defaults(), batchSize, Duration.ofSeconds(30)))
-                .toList();
-        ExecutorService pool = Executors.newFixedThreadPool(workerCount);
-        AtomicBoolean done = new AtomicBoolean();
-        AtomicReference<Throwable> workerError = new AtomicReference<>();
-        CountDownLatch started = new CountDownLatch(workerCount);
+    /** 清空并预置数据，用实际发布的调度器（单 Relay + N worker）排空并打印吞吐。 */
+    private void measured(String label, int batchSize, int workers, int measuredBatchSize) {
+        jdbc.update("DELETE FROM outboxpro_outbox");
+        preload(RECORD_COUNT);
+        long elapsedMillis = drainWithScheduler(workers, measuredBatchSize);
+        assertThat(countSent()).as("%s, batchSize=%d 时应全部投递", label, batchSize).isEqualTo(RECORD_COUNT);
+        double recordsPerSecond = RECORD_COUNT * 1000.0 / Math.max(1, elapsedMillis);
+        System.out.printf("OutboxRelay baseline: %s, batchSize=%d, records=%d, elapsed=%dms, throughput=%.0f records/s%n",
+                label, batchSize, RECORD_COUNT, elapsedMillis, recordsPerSecond);
+    }
+
+    /** 使用生产同款 OutboxRelayScheduler（共享 Relay、N worker、空闲退避）排空全部记录。 */
+    private long drainWithScheduler(int workerCount, int batchSize) {
+        OutboxRelay relay = new OutboxRelay(outboxRepository, new NoopPublisher(),
+                RetryPolicy.defaults(), batchSize, Duration.ofSeconds(30));
+        OutboxRelayScheduler scheduler = new OutboxRelayScheduler(
+                relay, workerCount, Duration.ofMillis(1), Duration.ofMillis(5));
         long startedNanos = System.nanoTime();
         try {
-            for (OutboxRelay relay : relays) {
-                pool.submit(() -> {
-                    started.countDown();
-                    try {
-                        while (!done.get()) {
-                            if (!relay.relayOnceAndReportActivity()) {
-                                try {
-                                    Thread.sleep(5);
-                                } catch (InterruptedException interrupted) {
-                                    Thread.currentThread().interrupt();
-                                    return;
-                                }
-                            }
-                        }
-                    } catch (Throwable error) {
-                        // 静默死亡会让基准结果严重失真，必须把异常带回测试线程。
-                        workerError.compareAndSet(null, error);
-                        done.set(true);
-                    }
-                });
-            }
-            await(started);
+            scheduler.start();
+            long deadline = startedNanos + TimeUnit.SECONDS.toNanos(DRAIN_TIMEOUT_SECONDS);
             while (countSent() < RECORD_COUNT) {
-                if (workerError.get() != null) {
-                    throw new IllegalStateException("relay worker failed", workerError.get());
+                if (System.nanoTime() > deadline) {
+                    throw new IllegalStateException("relay drain timed out after "
+                            + DRAIN_TIMEOUT_SECONDS + "s: sent=" + countSent());
                 }
                 Thread.sleep(20);
             }
-            assertThat(countSent()).as("workers=%d 时应全部投递", workerCount).isEqualTo(RECORD_COUNT);
             return (System.nanoTime() - startedNanos) / 1_000_000;
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("interrupted while measuring relay throughput", interrupted);
         } finally {
-            done.set(true);
-            pool.shutdown();
-            try {
-                if (!pool.awaitTermination(30, TimeUnit.SECONDS)) {
-                    pool.shutdownNow();
-                }
-            } catch (InterruptedException interrupted) {
-                Thread.currentThread().interrupt();
-                pool.shutdownNow();
-            }
-        }
-    }
-
-    private void await(CountDownLatch latch) throws InterruptedException {
-        if (!latch.await(10, TimeUnit.SECONDS)) {
-            throw new IllegalStateException("relay workers did not start in time");
+            scheduler.stop();
         }
     }
 

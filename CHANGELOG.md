@@ -27,8 +27,12 @@ V1.4 聚焦 Relay 容量与稳定性：单实例多工作线程、空闲指数�
 - Relay 单轮耗时 Timer：`outboxpro.relay.cycle.duration`，标签 `claimed=true|false`，
   用于区分空轮与有效轮、定位慢轮。
 - 消费耗时 Timer：`outboxpro.consume.duration`，标签 `event_type`、`consumer`、`queue`。
-- 最老待投递消息年龄 Gauge：`outboxpro.outbox.oldest_pending_age`（秒），
-  健康检查详情同步暴露 `outboxOldestPendingAgeSeconds`；仓储未实现该查询时降级为空值。
+- 最老可投递消息年龄 Gauge：`outboxpro.outbox.oldest_pending_age`（秒），只统计
+  PENDING 与已到 `next_retry_time` 的 RETRY_WAITING；健康检查详情同步暴露
+  `outboxOldestPendingAgeSeconds`。仓储未实现该查询时降级为空值，查询失败也只
+  影响该字段，不会清空积压计数。
+- 新增 `V6__outboxpro_status_created_index.sql`：为年龄聚合补充
+  `(status, created_time)` 索引；自动建表模式会幂等补齐该索引。
 - `OutboxRepository.oldestPendingAgeSeconds(Instant)` 新增 default 方法，
   旧的自定义仓储实现保持二进制兼容。
 
@@ -47,10 +51,17 @@ V1.4 聚焦 Relay 容量与稳定性：单实例多工作线程、空闲指数�
   现在恢复操作按半个租约周期节流，并将认领与恢复事务显式设为
   `READ_COMMITTED`，避免范围更新持有间隙锁。
 - `OutboxRelayScheduler` 的工作线程异常不再终止整个调度器：单轮异常按空闲轮处理并继续调度。
+- 调度器 `stop()` 会取消尚未到期的延迟任务，不再等待一个完整空闲退避周期后才中断在途发布。
+- 批量发布的 `outboxpro.publish.duration` 改为按各条 Confirm 实际完成时刻记录，
+  不再把前序记录的等待时间计入后续记录。
 
 ### 升级说明
 
-- 默认配置行为与 1.3 一致（`workers=1`、空闲退避上限 5s），升级无需修改配置。
+- `workers` 默认 `1`，单线程行为不变；空闲退避默认上限 `5s`，意味着系统完全空闲后
+  新消息最坏会晚约 5 秒被认领。若需要与旧版本完全一致的 1 秒轮询，请显式设置
+  `outboxpro.producer.idle-backoff-max` 等于 `poll-interval`。
+- 调度器会把空闲退避上限约束在半个 `claim-timeout` 以内（且不少于 1 秒、
+  不低于 `poll-interval`），确保崩溃实例遗留的 PROCESSING 记录能及时恢复。
 - 新增指标为低基数计数器/Timer，未接入 Micrometer 时自动降级为 no-op。
 - 自定义 `OutboxRepository` 无需改动；如需最老积压指标，覆盖
   `oldestPendingAgeSeconds` 即可。

@@ -72,12 +72,18 @@ public class OutboxProObservabilitySnapshot {
         boolean outboxQueryFailed = false;
         try {
             outbox = outboxRepository == null ? Map.of() : outboxRepository.countByStatus();
-            oldestPendingAgeSeconds = outboxRepository == null ? null : outboxRepository.oldestPendingAgeSeconds(now);
         } catch (RuntimeException error) {
             log.warn("Outbox backlog snapshot query failed", error);
             outbox = Map.of();
-            oldestPendingAgeSeconds = null;
             outboxQueryFailed = true;
+        }
+        // 最老积压年龄是可选增强能力：查询失败只降级该字段，不能连带清空状态计数，
+        // 否则所有积压 Gauge 会归零、健康检查会误报 DOWN。
+        try {
+            oldestPendingAgeSeconds = outboxRepository == null ? null : outboxRepository.oldestPendingAgeSeconds(now);
+        } catch (RuntimeException error) {
+            log.warn("Outbox oldest pending age query failed; falling back to unknown", error);
+            oldestPendingAgeSeconds = null;
         }
 
         Map<String, Long> dlq;
@@ -96,6 +102,13 @@ public class OutboxProObservabilitySnapshot {
     public record OutboxSnapshot(Map<String, Long> outboxByStatus, Map<String, Long> pendingReplayByReason,
                                  Long oldestPendingAgeSeconds, boolean outboxQueryFailed, boolean dlqQueryFailed,
                                  Instant capturedAt) {
+
+        /** 兼容 V1.3 的五参数签名，避免已编译的调用方在升级后出现 NoSuchMethodError。 */
+        public OutboxSnapshot(Map<String, Long> outboxByStatus, Map<String, Long> pendingReplayByReason,
+                              boolean outboxQueryFailed, boolean dlqQueryFailed, Instant capturedAt) {
+            this(outboxByStatus, pendingReplayByReason, null, outboxQueryFailed, dlqQueryFailed, capturedAt);
+        }
+
         static OutboxSnapshot unsupported() {
             return new OutboxSnapshot(Map.of(), Map.of(), null, false, false, Instant.EPOCH);
         }

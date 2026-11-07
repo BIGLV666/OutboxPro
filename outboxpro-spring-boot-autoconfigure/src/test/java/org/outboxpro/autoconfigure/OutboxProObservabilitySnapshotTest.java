@@ -44,6 +44,24 @@ class OutboxProObservabilitySnapshotTest {
                 .isNull();
     }
 
+    /** 可选年龄查询失败只降级该字段，状态计数与健康检查仍应可用。 */
+    @Test
+    void oldestAgeFailureShouldNotDiscardStatusCounts() {
+        OutboxRepository repository = new CountingRepository(new AtomicInteger(),
+                new CountDownLatch(0), completedLatch()) {
+            @Override public Long oldestPendingAgeSeconds(java.time.Instant now) {
+                throw new IllegalStateException("created_time column missing");
+            }
+        };
+        OutboxProObservabilitySnapshot snapshot =
+                new OutboxProObservabilitySnapshot(repository, null, Duration.ofSeconds(30));
+
+        var value = snapshot.get();
+        assertThat(value.outboxCount("PENDING")).isEqualTo(1L);
+        assertThat(value.oldestPendingAgeSeconds()).isNull();
+        assertThat(value.outboxQueryFailed()).isFalse();
+    }
+
     @Test
     void oldestPendingAgeShouldComeFromRepositorySnapshot() {
         OutboxProObservabilitySnapshot snapshot = new OutboxProObservabilitySnapshot(
@@ -95,7 +113,7 @@ class OutboxProObservabilitySnapshotTest {
         return latch;
     }
 
-    private static final class CountingRepository implements OutboxRepository {
+    private static class CountingRepository implements OutboxRepository {
         private final AtomicInteger queries;
         private final CountDownLatch ready;
         private final CountDownLatch start;

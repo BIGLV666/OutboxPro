@@ -88,6 +88,14 @@ public final class OutboxRelay {
     }
 
     /**
+     * @return 认领租约时长。调度器据此限制空闲退避上限，确保崩溃实例遗留的
+     *         PROCESSING 记录不会被过长的空闲轮询推迟恢复。
+     */
+    public Duration claimTimeout() {
+        return claimTimeout;
+    }
+
+    /**
      * 执行一次 Outbox 认领、发布和状态更新循环。
      * 发布成功标记为 SENT；可重试异常进入 RETRY_WAITING；超过次数进入 DEAD。
      *

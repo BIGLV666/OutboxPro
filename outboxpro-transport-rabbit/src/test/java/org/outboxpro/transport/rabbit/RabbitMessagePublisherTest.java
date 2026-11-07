@@ -1,6 +1,7 @@
 package org.outboxpro.transport.rabbit;
 
 import org.junit.jupiter.api.Test;
+import org.outboxpro.core.metrics.OutboxMetrics;
 import org.outboxpro.spi.persistence.OutboxRecord;
 import org.outboxpro.spi.transport.MessagePublisher.PublishOutcome;
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
@@ -8,7 +9,9 @@ import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.connection.CorrelationData;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 
+import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
@@ -62,6 +65,21 @@ class RabbitMessagePublisherTest {
         assertThat(outcomes.get(2).success()).as("Confirm NACK 应失败").isFalse();
     }
 
+    /** Confirm 超时时每条记录仍只产生一个耗时样本，超时 Counter 按记录递增。 */
+    @Test
+    void batchTimeoutRecordsOneDurationAndOneTimeoutPerRecord() {
+        RabbitTemplate template = mock(RabbitTemplate.class);
+        when(template.getConnectionFactory()).thenReturn(new CachingConnectionFactory());
+        RecordingMetrics metrics = new RecordingMetrics();
+        RabbitMessagePublisher publisher = new RabbitMessagePublisher(template, 20, metrics);
+
+        List<PublishOutcome> outcomes = publisher.publishAll(List.of(record(1, "a"), record(2, "b")));
+
+        assertThat(outcomes).allMatch(outcome -> !outcome.success());
+        assertThat(metrics.durations).hasSize(2);
+        assertThat(metrics.timeouts).isEqualTo(2);
+    }
+
     @Test
     void singlePublishThrowsWhenConfirmTimesOut() {
         // 不 stub convertAndSend：Confirm 永不到达，触发超时路径。
@@ -91,5 +109,18 @@ class RabbitMessagePublisherTest {
         when(template.getConnectionFactory()).thenReturn(new CachingConnectionFactory());
         assertThatCode(() -> new RabbitMessagePublisher(template, 1000))
                 .doesNotThrowAnyException();
+    }
+
+    /** 记录每个事件实际产生的发布耗时样本数与 Confirm 超时次数。 */
+    private static final class RecordingMetrics implements OutboxMetrics {
+        final List<Duration> durations = new CopyOnWriteArrayList<>();
+        int timeouts;
+
+        @Override public void publishDuration(String eventType, String producer, Duration duration) {
+            durations.add(duration);
+        }
+        @Override public void publishConfirmTimeout(String eventType, String producer) {
+            timeouts++;
+        }
     }
 }

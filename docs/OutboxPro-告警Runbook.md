@@ -14,7 +14,7 @@
 | `outboxpro.outbox.backlog.processing` | 当前 PROCESSING 认领中数量 | 无 |
 | `outboxpro.outbox.backlog.retry_waiting` | 当前 RETRY_WAITING 等待重试数量 | 无 |
 | `outboxpro.outbox.backlog.dead` | 当前 DEAD 生产端死信数量 | 无 |
-| `outboxpro.outbox.oldest_pending_age` | 最老 PENDING/RETRY_WAITING 消息年龄（秒） | 无 |
+| `outboxpro.outbox.oldest_pending_age` | 最老可投递消息年龄（秒）：PENDING 与已到期 RETRY_WAITING | 无 |
 | `outboxpro.dlq.backlog.pending_replay` | 当前待人工重放死信总量 | 无 |
 | `outboxpro.dlq.backlog.by_reason` | 当前待人工重放死信按原因分布 | `reason` |
 
@@ -202,10 +202,10 @@ POST /actuator/outboxpro-ops/outbox/{eventId}/replay
 
 ## 6. 性能与容量提示
 
-- Relay 单实例吞吐基线（2000 条记录、真实 MySQL、零延迟 Publisher）：
-  - 1 worker / batch 500：约 950–1000 records/s；
+- Relay 单实例吞吐基线（2000 条记录、真实 MySQL、零延迟 Publisher、8 连接池）：
+  - 1 worker / batch 500：约 960–1040 records/s；
   - 2 worker / batch 500：约 1900 records/s；
-  - 4 worker / batch 500：约 2200 records/s。
+  - 4 worker / batch 500：约 2800 records/s。
   详见 [性能基线](性能基线.md)。该数字不含 RabbitMQ 网络与 Confirm 等待。
 - 若 `outboxpro.relay.cycle.duration` 的 `claimed=true` 分位持续升高，
   同时 `outboxpro.publish.duration` 正常，优先检查数据库锁等待与 `producer.workers`
