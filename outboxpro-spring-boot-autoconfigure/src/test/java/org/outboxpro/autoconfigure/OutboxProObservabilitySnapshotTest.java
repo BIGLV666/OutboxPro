@@ -39,6 +39,18 @@ class OutboxProObservabilitySnapshotTest {
         var value = snapshot.get();
         assertThat(value.outboxByStatus()).isEmpty();
         assertThat(value.pendingReplayCount()).isNull();
+        assertThat(value.oldestPendingAgeSeconds())
+                .as("查询失败时消息年龄应为未知，而不是伪造 0")
+                .isNull();
+    }
+
+    @Test
+    void oldestPendingAgeShouldComeFromRepositorySnapshot() {
+        OutboxProObservabilitySnapshot snapshot = new OutboxProObservabilitySnapshot(
+                new CountingRepository(new AtomicInteger(), new CountDownLatch(0), completedLatch()),
+                null, Duration.ofSeconds(30));
+
+        assertThat(snapshot.get().oldestPendingAgeSeconds()).isEqualTo(42L);
     }
 
     @Test
@@ -105,6 +117,9 @@ class OutboxProObservabilitySnapshotTest {
         @Override public void markDead(long id, String owner, int attempt, String errorType,
                                        String errorMessage) { }
         @Override public int recoverExpiredClaims(java.time.Instant now) { return 0; }
+        @Override public Long oldestPendingAgeSeconds(java.time.Instant now) {
+            return 42L;
+        }
         @Override public Map<String, Long> countByStatus() {
             queries.incrementAndGet();
             if (ready.getCount() > 0) {

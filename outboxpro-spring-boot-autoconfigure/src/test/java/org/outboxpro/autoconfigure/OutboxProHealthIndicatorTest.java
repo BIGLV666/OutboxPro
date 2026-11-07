@@ -81,7 +81,7 @@ class OutboxProHealthIndicatorTest {
         }
 
         @Override public OutboxSnapshot get() {
-            return new OutboxSnapshot(outbox, dlqByReason, false, false, java.time.Instant.now());
+            return new OutboxSnapshot(outbox, dlqByReason, 0L, false, false, java.time.Instant.now());
         }
     }
 
@@ -91,7 +91,7 @@ class OutboxProHealthIndicatorTest {
         }
 
         @Override public OutboxSnapshot get() {
-            return new OutboxSnapshot(Map.of(), Map.of(), true, false, java.time.Instant.now());
+            return new OutboxSnapshot(Map.of(), Map.of(), null, true, false, java.time.Instant.now());
         }
     }
 

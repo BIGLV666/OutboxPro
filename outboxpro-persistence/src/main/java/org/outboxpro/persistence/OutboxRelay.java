@@ -16,6 +16,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Outbox 投递中继，负责批量认领消息、事务外发布和状态更新。
@@ -36,6 +37,9 @@ public final class OutboxRelay {
     private final OutboxMetrics metrics;
     private final MessageLogSink logSink;
     private final String owner = UUID.randomUUID().toString();
+    /** 租约恢复是维护动作，按租约时长的固定比例节流，避免每个 worker 每轮都扫描 PROCESSING。 */
+    private final long recoveryIntervalNanos;
+    private final AtomicLong lastRecoveryNanos = new AtomicLong(Long.MIN_VALUE);
 
     /**
      * 创建 Relay（无指标上报、无消息日志）。
@@ -80,6 +84,7 @@ public final class OutboxRelay {
         this.claimTimeout = claimTimeout;
         this.metrics = metrics == null ? OutboxMetrics.NOOP : metrics;
         this.logSink = logSink;
+        this.recoveryIntervalNanos = Math.max(Duration.ofSeconds(1).toNanos(), claimTimeout.toNanos() / 2);
     }
 
     /**
@@ -91,15 +96,60 @@ public final class OutboxRelay {
      * （记录会被其他实例重新发布），但必须打点告警暴露 claimTimeout 配置问题。</p>
      */
     public void relayOnce() {
-        Instant now = Instant.now();
-        repository.recoverExpiredClaims(now);
-        List<OutboxRecord> records = repository.claimBatch(owner, batchSize, now, now.plus(claimTimeout));
-        if (!records.isEmpty()) {
-            metrics.relayClaimed(records.size());
+        relayOnceAndReportActivity();
+    }
+
+    /**
+     * 执行一次 Relay 循环，并报告本轮是否认领到消息。
+     *
+     * <p>调度器用返回值区分"有活"和"空轮"：空轮可以指数退避，避免多实例空闲时
+     * 把轮询压力放大到数据库。该方法与 {@link #relayOnce()} 执行完全相同的逻辑，
+     * 仅额外返回活动标记，便于在不破坏旧 API 的前提下接入自适应轮询。</p>
+     *
+     * @return 本轮是否认领到至少一条消息
+     */
+    public boolean relayOnceAndReportActivity() {
+        long cycleStartedNanos = System.nanoTime();
+        boolean claimedAny = false;
+        try {
+            Instant now = Instant.now();
+            recoverExpiredClaimsIfDue(now);
+            List<OutboxRecord> records = repository.claimBatch(owner, batchSize, now, now.plus(claimTimeout));
+            if (!records.isEmpty()) {
+                claimedAny = true;
+                metrics.relayClaimed(records.size());
+            }
+            if (records.isEmpty()) {
+                return false;
+            }
+            publishClaimed(records);
+            return true;
+        } finally {
+            metrics.relayCycle(Duration.ofNanos(System.nanoTime() - cycleStartedNanos), claimedAny);
         }
-        if (records.isEmpty()) {
+    }
+
+    /**
+     * 按租约周期节流执行过期认领恢复。
+     *
+     * <p>恢复 SQL 会扫描 PROCESSING 状态范围；若每个 worker 每轮都执行，在高并发认领时
+     * 会产生大量间隙锁与无效扫描，反而拖慢正常认领。租约本身只有在 claimTimeout 之后
+     * 才可能过期，因此每半个租约周期检查一次即可。CAS 保证同一 Relay 实例的多轮并发
+     * 最多只有一个线程真正执行恢复。</p>
+     */
+    private void recoverExpiredClaimsIfDue(Instant now) {
+        long current = System.nanoTime();
+        long last = lastRecoveryNanos.get();
+        if (last != Long.MIN_VALUE && current - last < recoveryIntervalNanos) {
             return;
         }
+        if (lastRecoveryNanos.compareAndSet(last, current)) {
+            repository.recoverExpiredClaims(now);
+        }
+    }
+
+    /** 发布本批已认领记录，并按发布结果推进状态机。 */
+    private void publishClaimed(List<OutboxRecord> records) {
         for (OutboxRecord record : records) {
             metrics.publishAttempt(record.eventType(), record.producer());
         }

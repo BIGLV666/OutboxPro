@@ -15,6 +15,49 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.*;
 
 class OutboxRelayTest {
+    /** 有记录时报告活动，空轮时报告空闲；调度器依赖该标记决定是否退避。 */
+    @Test
+    void activityFlagDistinguishesClaimedAndEmptyCycles() {
+        OutboxRelay active = new OutboxRelay(new FakeRepository(), record -> { },
+                RetryPolicy.defaults(), 10, Duration.ofSeconds(30));
+        assertTrue(active.relayOnceAndReportActivity());
+
+        OutboxRelay idle = new OutboxRelay(new EmptyRepository(), record -> { },
+                RetryPolicy.defaults(), 10, Duration.ofSeconds(30));
+        assertFalse(idle.relayOnceAndReportActivity());
+    }
+
+    /** 每轮 Relay 都应上报耗时与活动标记，便于观察空闲轮和慢轮。 */
+    @Test
+    void relayCycleIsReportedThroughMetrics() {
+        RecordingMetrics metrics = new RecordingMetrics();
+        OutboxRelay relay = new OutboxRelay(new EmptyRepository(), record -> { },
+                RetryPolicy.defaults(), 10, Duration.ofSeconds(30), metrics);
+        relay.relayOnceAndReportActivity();
+
+        assertEquals(1, metrics.cycles);
+        assertFalse(metrics.lastCycleClaimed);
+        assertNotNull(metrics.lastCycleDuration);
+    }
+
+    /**
+     * 租约恢复必须按租约周期节流：多 worker 高频轮询时，每个 worker 每轮都扫描
+     * PROCESSING 范围会制造间隙锁并严重拖慢正常认领（V1.4 基准中曾把 4 worker
+     * 吞吐压到 67 records/s）。首轮必须恢复，随后一个租约周期内不再重复。
+     */
+    @Test
+    void expiredClaimRecoveryIsThrottledBetweenCycles() {
+        EmptyRepository repository = new EmptyRepository();
+        OutboxRelay relay = new OutboxRelay(repository, record -> { },
+                RetryPolicy.defaults(), 10, Duration.ofSeconds(30));
+
+        relay.relayOnce();
+        relay.relayOnce();
+        relay.relayOnce();
+
+        assertEquals(1, repository.recoveries, "同一租约周期内只应执行一次过期认领恢复");
+    }
+
     @Test
     void successfulPublishMarksSent() {
         FakeRepository repository = new FakeRepository();
@@ -97,6 +140,20 @@ class OutboxRelayTest {
         assertEquals("event-1", sink.records.get(0).eventId());
     }
 
+    /** 始终没有可认领记录的仓储桩，用于验证空轮活动标记和租约恢复节流。 */
+    private static class EmptyRepository implements OutboxRepository {
+        int recoveries;
+        @Override public void insert(OutboxRecord record) { }
+        @Override public List<OutboxRecord> claimBatch(String owner, int batchSize, Instant now, Instant claimUntil) {
+            return List.of();
+        }
+        @Override public void markSent(long id, String owner, Instant sentAt) { }
+        @Override public void markRetryWaiting(long id, String owner, int attempt, Instant nextRetryAt,
+                                               String errorType, String errorMessage) { }
+        @Override public void markDead(long id, String owner, int attempt, String errorType, String errorMessage) { }
+        @Override public int recoverExpiredClaims(Instant now) { recoveries++; return 0; }
+    }
+
     private static final class FakeRepository implements OutboxRepository {
         private final OutboxRecord record = new OutboxRecord(1, "event-1", "demo.created", "v1", "demo", "demo.exchange", "demo.created", "{}", null, null, null, "PENDING", 0, null, null, null);
         boolean sent; boolean dead;
@@ -139,7 +196,15 @@ class OutboxRelayTest {
     /** 记录租约丢失上报次数的指标桩。 */
     private static final class RecordingMetrics implements OutboxMetrics {
         int leaseLost;
+        int cycles;
+        Duration lastCycleDuration;
+        boolean lastCycleClaimed;
         @Override public void relayLeaseLost(String eventType, String producer) { leaseLost++; }
+        @Override public void relayCycle(Duration duration, boolean claimed) {
+            cycles++;
+            lastCycleDuration = duration;
+            lastCycleClaimed = claimed;
+        }
     }
 
     /** 捕获全部生命周期记录的日志 Sink 桩。 */

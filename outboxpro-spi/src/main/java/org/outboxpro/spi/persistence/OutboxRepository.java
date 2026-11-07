@@ -149,4 +149,18 @@ public interface OutboxRepository {
     default Map<String, Long> countByStatus() {
         return Map.of();
     }
+
+    /**
+     * 统计待投递消息中最早一条的等待时长，用于识别“队列不长但消息很老”的积压。
+     *
+     * <p>待投递指 PENDING 与已到期的 RETRY_WAITING；没有待投递消息时应返回 0。
+     * 实现不支持该统计时返回 {@code null}，调用方据此区分“0 秒”与“未知”。
+     * 查询应命中状态索引并限制为聚合查询，适合由观测快照按 TTL 节流调用。</p>
+     *
+     * @param now 当前时间
+     * @return 最早待投递消息的等待秒数；无积压返回 0；不支持时返回 {@code null}
+     */
+    default Long oldestPendingAgeSeconds(Instant now) {
+        return null;
+    }
 }

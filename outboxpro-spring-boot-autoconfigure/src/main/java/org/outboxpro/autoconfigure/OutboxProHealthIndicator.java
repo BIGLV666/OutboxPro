@@ -54,6 +54,8 @@ public final class OutboxProHealthIndicator implements HealthIndicator {
         builder.withDetail("outboxProcessing", valueOrUnknown(processing));
         builder.withDetail("outboxRetryWaiting", valueOrUnknown(retryWaiting));
         builder.withDetail("outboxDead", valueOrUnknown(dead));
+        builder.withDetail("outboxOldestPendingAgeSeconds",
+                valueOrUnknown(current.oldestPendingAgeSeconds()));
         builder.withDetail("dlqPendingReplay", valueOrUnknown(dlqPending));
         builder.withDetail("snapshotCapturedAt", current.capturedAt().toString());
         builder.withDetail("outboxStatsAvailable", !current.outboxByStatus().isEmpty());

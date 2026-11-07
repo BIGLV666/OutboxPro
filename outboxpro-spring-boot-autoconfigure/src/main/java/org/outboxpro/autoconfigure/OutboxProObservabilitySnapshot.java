@@ -68,12 +68,15 @@ public class OutboxProObservabilitySnapshot {
 
     private OutboxSnapshot load(Instant now) {
         Map<String, Long> outbox;
+        Long oldestPendingAgeSeconds = null;
         boolean outboxQueryFailed = false;
         try {
             outbox = outboxRepository == null ? Map.of() : outboxRepository.countByStatus();
+            oldestPendingAgeSeconds = outboxRepository == null ? null : outboxRepository.oldestPendingAgeSeconds(now);
         } catch (RuntimeException error) {
             log.warn("Outbox backlog snapshot query failed", error);
             outbox = Map.of();
+            oldestPendingAgeSeconds = null;
             outboxQueryFailed = true;
         }
 
@@ -86,14 +89,15 @@ public class OutboxProObservabilitySnapshot {
             dlq = Map.of();
             dlqQueryFailed = true;
         }
-        return new OutboxSnapshot(outbox, dlq, outboxQueryFailed, dlqQueryFailed, now);
+        return new OutboxSnapshot(outbox, dlq, oldestPendingAgeSeconds, outboxQueryFailed, dlqQueryFailed, now);
     }
 
     /** 当前框架积压快照。 */
     public record OutboxSnapshot(Map<String, Long> outboxByStatus, Map<String, Long> pendingReplayByReason,
-                                 boolean outboxQueryFailed, boolean dlqQueryFailed, Instant capturedAt) {
+                                 Long oldestPendingAgeSeconds, boolean outboxQueryFailed, boolean dlqQueryFailed,
+                                 Instant capturedAt) {
         static OutboxSnapshot unsupported() {
-            return new OutboxSnapshot(Map.of(), Map.of(), false, false, Instant.EPOCH);
+            return new OutboxSnapshot(Map.of(), Map.of(), null, false, false, Instant.EPOCH);
         }
 
         /** @return 指定 Outbox 状态数量；不支持时返回 null。 */
@@ -115,6 +119,11 @@ public class OutboxProObservabilitySnapshot {
         /** @return Outbox 状态分布；不支持时返回空 Map。 */
         public Map<String, Long> outboxByStatus() {
             return outboxByStatus;
+        }
+
+        /** @return 最早待投递消息的等待秒数；无积压为 0，不支持时为 null。 */
+        public Long oldestPendingAgeSeconds() {
+            return oldestPendingAgeSeconds;
         }
     }
 

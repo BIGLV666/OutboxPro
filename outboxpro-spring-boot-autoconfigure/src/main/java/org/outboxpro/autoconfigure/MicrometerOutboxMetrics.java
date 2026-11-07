@@ -5,6 +5,8 @@ import io.micrometer.core.instrument.Tag;
 import io.micrometer.core.instrument.Tags;
 import org.outboxpro.core.metrics.OutboxMetrics;
 
+import java.time.Duration;
+
 /**
  * 基于 Micrometer 的指标上报实现。
  *
@@ -19,6 +21,10 @@ import org.outboxpro.core.metrics.OutboxMetrics;
  *       （标签 event_type、consumer、queue）</li>
  *   <li>outboxpro.inbox.duplicate（标签 event_type、consumer）</li>
  *   <li>outboxpro.consume.dead.reason（标签 event_type、consumer、queue、reason）</li>
+ *   <li>outboxpro.publish.duration（标签 event_type、producer）</li>
+ *   <li>outboxpro.consume.duration（标签 event_type、consumer、queue）</li>
+ *   <li>outboxpro.relay.cycle.duration（标签 claimed=true/false）</li>
+ *   <li>outboxpro.publish.confirm.timeout（标签 event_type、producer）</li>
  * </ul>
  */
 public final class MicrometerOutboxMetrics implements OutboxMetrics {
@@ -46,6 +52,24 @@ public final class MicrometerOutboxMetrics implements OutboxMetrics {
     }
 
     @Override
+    public void publishDuration(String eventType, String producer, Duration duration) {
+        registry.timer("outboxpro.publish.duration",
+                Tags.of(Tag.of("event_type", tag(eventType)), Tag.of("producer", tag(producer))))
+                .record(duration);
+    }
+
+    @Override
+    public void publishConfirmTimeout(String eventType, String producer) {
+        publishCounter("outboxpro.publish.confirm.timeout", eventType, producer).increment();
+    }
+
+    @Override
+    public void relayCycle(Duration duration, boolean claimed) {
+        registry.timer("outboxpro.relay.cycle.duration", Tags.of(Tag.of("claimed", Boolean.toString(claimed))))
+                .record(duration);
+    }
+
+    @Override
     public void relayClaimed(int count) {
         registry.counter("outboxpro.relay.claimed").increment(count);
     }
@@ -63,6 +87,14 @@ public final class MicrometerOutboxMetrics implements OutboxMetrics {
     @Override
     public void consumeFailed(String eventType, String consumer, String queue) {
         consumeCounter("outboxpro.consume.failure", eventType, consumer, queue).increment();
+    }
+
+    @Override
+    public void consumeDuration(String eventType, String consumer, String queue, Duration duration) {
+        registry.timer("outboxpro.consume.duration",
+                Tags.of(Tag.of("event_type", tag(eventType)), Tag.of("consumer", tag(consumer)),
+                        Tag.of("queue", tag(queue))))
+                .record(duration);
     }
 
     @Override

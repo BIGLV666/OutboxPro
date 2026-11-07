@@ -10,6 +10,8 @@ OutboxPro 是面向 Spring Boot 的事务消息与 RabbitMQ 操作简化组件�
 - [V1 维护手册](docs/OutboxPro-维护手册.md)
 - [死信队列 (DLQ) 功能](docs/DLQ-README.md)
 - [观测与告警 Runbook](docs/OutboxPro-告警Runbook.md)
+- [Relay 性能基线（V1.4）](docs/性能基线.md)
+- [变更日志](CHANGELOG.md)
 - [示例应用：10 分钟跑通全流程](outboxpro-example-order/README.md)
 
 ## 模块
@@ -29,7 +31,7 @@ OutboxPro 是面向 Spring Boot 的事务消息与 RabbitMQ 操作简化组件�
 <dependency>
     <groupId>io.github.biglv666</groupId>
     <artifactId>outboxpro-spring-boot-starter</artifactId>
-    <version>1.1.0</version>
+    <version>1.4.0</version>
 </dependency>
 ```
 
@@ -56,7 +58,9 @@ outboxpro:
   producer:
     relay-enabled: true
     batch-size: 100
+    workers: 2
     poll-interval: 1s
+    idle-backoff-max: 5s
     confirm-timeout: 10s
   consumer:
     concurrency: 3
@@ -175,7 +179,29 @@ outboxpro:
 ```
 
 Gauge 与健康检查共享同一份 TTL 快照，避免监控抓取频率放大数据库压力。
+V1.4 额外暴露最老待投递消息年龄 `outboxpro.outbox.oldest_pending_age`（秒），
+用于判断“有新消息但 Relay 没推进”的延迟问题。
 指标清单与告警处理流程见 [观测与告警 Runbook](docs/OutboxPro-告警Runbook.md)。
+
+## 容量与稳定性（V1.4）
+
+Relay 支持单实例并行认领与空闲退避：
+
+```yaml
+outboxpro:
+  producer:
+    workers: 2                 # 1–64，依赖 MySQL SKIP LOCKED 保证认领不重叠
+    batch-size: 100            # 建议 100–500
+    poll-interval: 1s          # 有消息时的基础轮询间隔
+    idle-backoff-max: 5s       # 连续空轮时指数退避的上限
+```
+
+- `workers` 线程共享同一个 `OutboxRelay` 与连接池；每个 worker 至少需要 1 个数据库连接，
+  建议连接池大小不低于 `workers + 1`。
+- 空轮时轮询间隔按 1s → 2s → 4s → 5s 退避；一旦认领到消息立即恢复 `poll-interval`。
+- V1.4 新增发布/消费耗时 Timer、Confirm 超时 Counter 与 Relay 单轮耗时 Timer，
+  详见 Runbook。
+- 同一机器上的吞吐基线与调优建议见 [Relay 性能基线](docs/性能基线.md)。
 
 ## 可靠性语义
 

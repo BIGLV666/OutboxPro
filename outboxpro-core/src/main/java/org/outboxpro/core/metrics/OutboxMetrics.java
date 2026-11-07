@@ -1,5 +1,7 @@
 package org.outboxpro.core.metrics;
 
+import java.time.Duration;
+
 /**
  * OutboxPro 指标门面：核心与适配器模块通过它上报运行指标，不依赖任何指标实现。
  *
@@ -20,6 +22,27 @@ public interface OutboxMetrics {
 
     /** 生产端发布失败（将进入重试或 DEAD）。 */
     default void publishFailure(String eventType, String producer) { }
+
+    /**
+     * 单条消息从写出到收到 Publisher Confirm 的耗时。
+     * 发布器实现按记录上报；未接入指标的实现保持空实现。
+     *
+     * @param eventType 事件类型
+     * @param producer 生产者名称
+     * @param duration 发布耗时
+     */
+    default void publishDuration(String eventType, String producer, Duration duration) { }
+
+    /** Publisher Confirm 等待超时（与 Broker NACK、连接失败区分，便于单独告警）。 */
+    default void publishConfirmTimeout(String eventType, String producer) { }
+
+    /**
+     * Relay 单轮执行耗时，用于观察认领 + 发布 + 状态回写整体开销。
+     *
+     * @param duration 单轮耗时
+     * @param claimed 本轮是否认领到消息；false 表示空闲轮
+     */
+    default void relayCycle(Duration duration, boolean claimed) { }
 
     /** Relay 单轮认领的消息数量。 */
     default void relayClaimed(int count) { }
@@ -44,6 +67,16 @@ public interface OutboxMetrics {
 
     /** 消费端处理抛出异常。 */
     default void consumeFailed(String eventType, String consumer, String queue) { }
+
+    /**
+     * 消费端单条消息的处理耗时（含 Handler、Inbox 与本地事务）。
+     *
+     * @param eventType 事件类型
+     * @param consumer 消费方名称
+     * @param queue 队列名称
+     * @param duration 处理耗时
+     */
+    default void consumeDuration(String eventType, String consumer, String queue, Duration duration) { }
 
     /** 消费端失败消息已可靠写入 Retry Queue。 */
     default void consumeRetried(String eventType, String consumer, String queue) { }

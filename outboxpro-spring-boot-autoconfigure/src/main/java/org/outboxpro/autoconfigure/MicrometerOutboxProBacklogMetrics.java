@@ -45,6 +45,10 @@ public final class MicrometerOutboxProBacklogMetrics {
                         value -> nonNegative(value.get().outboxCount(status.toUpperCase(Locale.ROOT))))
                 .strongReference(true)
                 .register(registry));
+        Gauge.builder("outboxpro.outbox.oldest_pending_age", snapshot,
+                        value -> nonNegative(value.get().oldestPendingAgeSeconds()))
+                .strongReference(true)
+                .register(registry);
         Gauge.builder("outboxpro.dlq.backlog.pending_replay", snapshot,
                         value -> nonNegative(value.get().pendingReplayCount()))
                 .strongReference(true)

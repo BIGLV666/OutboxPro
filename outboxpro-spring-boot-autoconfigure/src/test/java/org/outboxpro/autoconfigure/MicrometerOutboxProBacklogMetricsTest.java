@@ -22,11 +22,24 @@ class MicrometerOutboxProBacklogMetricsTest {
 
         assertThat(registry.get("outboxpro.outbox.backlog.pending").gauge().value()).isZero();
         assertThat(registry.get("outboxpro.outbox.backlog.dead").gauge().value()).isZero();
+        assertThat(registry.get("outboxpro.outbox.oldest_pending_age").gauge().value()).isZero();
         assertThat(registry.get("outboxpro.dlq.backlog.pending_replay").gauge().value()).isZero();
         assertThat(registry.get("outboxpro.dlq.backlog.by_reason").tag("reason", "RETRY_EXHAUSTED")
                 .gauge().value()).isZero();
         assertThat(registry.get("outboxpro.dlq.backlog.by_reason").tag("reason", "UNKNOWN")
                 .gauge().value()).isZero();
+    }
+
+    @Test
+    void oldestPendingAgeGaugeShouldExposeRepositoryValue() {
+        MeterRegistry registry = new SimpleMeterRegistry();
+        OutboxProObservabilitySnapshot snapshot = new OutboxProObservabilitySnapshot(
+                new EmptyRepository() {
+                    @Override public Long oldestPendingAgeSeconds(java.time.Instant now) { return 12L; }
+                }, null, Duration.ofSeconds(30));
+        new MicrometerOutboxProBacklogMetrics(snapshot, registry);
+
+        assertThat(registry.get("outboxpro.outbox.oldest_pending_age").gauge().value()).isEqualTo(12.0);
     }
 
     @Test
@@ -40,7 +53,7 @@ class MicrometerOutboxProBacklogMetricsTest {
         registry.get("outboxpro.outbox.backlog.pending").gauge().value();
     }
 
-    private static final class EmptyRepository implements OutboxRepository {
+    private static class EmptyRepository implements OutboxRepository {
         @Override public void insert(org.outboxpro.spi.persistence.OutboxRecord record) { }
         @Override public java.util.List<org.outboxpro.spi.persistence.OutboxRecord> claimBatch(
                 String owner, int batchSize, java.time.Instant now, java.time.Instant claimUntil) {

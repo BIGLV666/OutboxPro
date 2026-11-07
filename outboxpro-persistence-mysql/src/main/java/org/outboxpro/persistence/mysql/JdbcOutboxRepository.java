@@ -4,6 +4,7 @@ import org.outboxpro.spi.persistence.OutboxQuery;
 import org.outboxpro.spi.persistence.OutboxRecord;
 import org.outboxpro.spi.persistence.OutboxRepository;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.sql.ResultSet;
@@ -59,6 +60,10 @@ public class JdbcOutboxRepository implements OutboxRepository {
      * <p>先使用行锁选出候选记录，再通过一次批量 UPDATE 完成状态迁移，避免原先按记录循环执行 SQL。
      * 候选记录已经被当前事务锁定，因此无需为每一行再次发起数据库往返。</p>
      *
+     * <p>事务隔离级别显式使用 READ_COMMITTED：MySQL 默认的 REPEATABLE READ 会让范围查询
+     * 加间隙锁，多 worker 并发认领时会造成锁等待甚至死锁；READ_COMMITTED 下
+     * {@code FOR UPDATE SKIP LOCKED} 只锁实际命中的记录行。</p>
+     *
      * @param owner 当前 Relay 实例标识
      * @param batchSize 最大认领数量
      * @param now 当前时间
@@ -66,7 +71,7 @@ public class JdbcOutboxRepository implements OutboxRepository {
      * @return 成功被当前实例认领的记录
      */
     @Override
-    @Transactional
+    @Transactional(isolation = Isolation.READ_COMMITTED)
     public List<OutboxRecord> claimBatch(String owner, int batchSize, Instant now, Instant claimUntil) {
         if (batchSize <= 0) {
             return List.of();
@@ -229,10 +234,15 @@ public class JdbcOutboxRepository implements OutboxRepository {
     /**
      * 恢复租约超时的 PROCESSING 记录。
      *
+     * <p>使用 READ_COMMITTED 隔离级别：该 UPDATE 会按 status + claimed_time 扫描范围，
+     * REPEATABLE READ 下的间隙锁会与并发认领互相阻塞。没有过期记录时
+     * READ_COMMITTED 只加行锁、不锁间隙，扫描成本也仅为一次索引区间探测。</p>
+     *
      * @param now 当前时间
      * @return 被恢复为 PENDING 的记录数量
      */
     @Override
+    @Transactional(isolation = Isolation.READ_COMMITTED)
     public int recoverExpiredClaims(Instant now) {
         return jdbc.update("""
                 UPDATE outboxpro_outbox
@@ -405,6 +415,23 @@ public class JdbcOutboxRepository implements OutboxRepository {
             }
         });
         return Map.copyOf(counts);
+    }
+
+    /**
+     * 查询最早待投递消息的等待秒数。
+     *
+     * <p>只聚合 PENDING 与 RETRY_WAITING，命中 {@code idx_outbox_pending}；
+     * 没有待投递消息时 {@code MIN(created_time)} 为 NULL，统一返回 0，
+     * 与“实现不支持”返回 {@code null} 区分。</p>
+     */
+    @Override
+    public Long oldestPendingAgeSeconds(Instant now) {
+        Long ageSeconds = jdbc.queryForObject("""
+                SELECT COALESCE(TIMESTAMPDIFF(SECOND, MIN(created_time), ?), 0)
+                FROM outboxpro_outbox
+                WHERE status IN ('PENDING', 'RETRY_WAITING')
+                """, Long.class, Timestamp.from(now));
+        return ageSeconds == null ? 0L : Math.max(0L, ageSeconds);
     }
 
     /** 运维检索单页行数上限，防止一次性拉取大结果集。 */

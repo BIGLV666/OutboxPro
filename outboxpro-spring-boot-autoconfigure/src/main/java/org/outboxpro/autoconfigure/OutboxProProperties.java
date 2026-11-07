@@ -138,7 +138,18 @@ public class OutboxProProperties {
         private boolean enabled = true;
         private boolean relayEnabled = true;
         private int batchSize = 100;
+        /**
+         * Relay 工作线程数。多线程依赖数据库 SKIP LOCKED 认领，单实例可横向扩容；
+         * 默认 1 保持与 V1.3 相同的行为。线程数受数据库连接池与 Broker 吞吐约束。
+         */
+        private int workers = 1;
         private Duration pollInterval = Duration.ofSeconds(1);
+        /**
+         * 连续空轮时的最大轮询间隔。空闲时按指数退避到该上限，认领到消息后立即恢复
+         * {@link #pollInterval}。若配置值小于 {@link #pollInterval}，实际仍按
+         * {@link #pollInterval} 轮询（退避不会比基础间隔更快）。
+         */
+        private Duration idleBackoffMax = Duration.ofSeconds(5);
         private Duration claimTimeout = Duration.ofSeconds(60);
         private Duration confirmTimeout = Duration.ofSeconds(10);
 
@@ -154,6 +165,14 @@ public class OutboxProProperties {
         public int getBatchSize() { return batchSize; }
         /** 设置单次 Relay 最大认领数量。 */
         public void setBatchSize(int batchSize) { this.batchSize = batchSize; }
+        /** 返回 Relay 工作线程数。 */
+        public int getWorkers() { return workers; }
+        /** 设置 Relay 工作线程数。 */
+        public void setWorkers(int workers) { this.workers = workers; }
+        /** 返回连续空轮时的最大轮询间隔。 */
+        public Duration getIdleBackoffMax() { return idleBackoffMax; }
+        /** 设置连续空轮时的最大轮询间隔。 */
+        public void setIdleBackoffMax(Duration idleBackoffMax) { this.idleBackoffMax = idleBackoffMax; }
         /** 返回 Relay 轮询间隔。 */
         public Duration getPollInterval() { return pollInterval; }
         /** 设置 Relay 轮询间隔。 */

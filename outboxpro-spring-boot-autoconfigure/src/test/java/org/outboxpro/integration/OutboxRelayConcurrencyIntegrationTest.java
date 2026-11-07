@@ -1,10 +1,12 @@
 package org.outboxpro.integration;
 
+import org.awaitility.Awaitility;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.outboxpro.core.OutboxProPublisher;
 import org.outboxpro.core.event.EventDefinition;
 import org.outboxpro.persistence.OutboxRelay;
+import org.outboxpro.autoconfigure.OutboxRelayScheduler;
 import org.outboxpro.spi.persistence.OutboxRepository;
 import org.outboxpro.spi.transport.MessagePublisher;
 import org.springframework.amqp.core.AmqpAdmin;
@@ -57,6 +59,7 @@ class OutboxRelayConcurrencyIntegrationTest extends AbstractOutboxProIntegration
     }
 
     private static final String EVENT_TYPE = "it.order.created";
+    private static final String BULK_EVENT_TYPE = "it.order.bulk";
     private static final String EXCHANGE = "it.concurrent.exchange";
     private static final String QUEUE = "it.concurrent.queue";
     private static final int EVENT_COUNT = 10;
@@ -94,6 +97,16 @@ class OutboxRelayConcurrencyIntegrationTest extends AbstractOutboxProIntegration
                     .route(EXCHANGE, EVENT_TYPE)
                     .build();
         }
+
+        /** 多 worker 用例使用独立事件类型，避免与原并发用例的 SENT 统计互相污染。 */
+        @Bean
+        EventDefinition<OrderCreatedPayload> bulkOrderCreatedDefinition() {
+            return EventDefinition.<OrderCreatedPayload>builder()
+                    .eventType(BULK_EVENT_TYPE)
+                    .payloadType(OrderCreatedPayload.class)
+                    .route(EXCHANGE, BULK_EVENT_TYPE)
+                    .build();
+        }
     }
 
     @BeforeEach
@@ -104,6 +117,7 @@ class OutboxRelayConcurrencyIntegrationTest extends AbstractOutboxProIntegration
         amqpAdmin.declareExchange(exchange);
         amqpAdmin.declareQueue(queue);
         amqpAdmin.declareBinding(binding);
+        amqpAdmin.declareBinding(BindingBuilder.bind(queue).to(exchange).with(BULK_EVENT_TYPE));
     }
 
     /** T9：两个 Relay 实例并发认领同一批消息，最终每条消息恰好投递一次。 */
@@ -161,6 +175,43 @@ class OutboxRelayConcurrencyIntegrationTest extends AbstractOutboxProIntegration
             deliveredEventIds.add((String) message.getMessageProperties().getHeader("x-outboxpro-event-id"));
         }
         assertThat(deliveredEventIds).hasSize(EVENT_COUNT).containsAll(eventIds);
+    }
+
+    /** V1.4：调度器多工作线程并行认领，20 条消息最终全部 SENT 且队列收到 20 个不同事件。 */
+    @Test
+    void schedulerWorkersDeliverAllMessagesExactlyOnce() {
+        int count = 20;
+        List<String> eventIds = new ArrayList<>();
+        for (int i = 1; i <= count; i++) {
+            long orderId = 10_000L + i;
+            var envelope = transactionTemplate.execute(
+                    status -> publisher.publish(BULK_EVENT_TYPE, new OrderCreatedPayload(orderId)));
+            eventIds.add(envelope.getEventId());
+        }
+
+        OutboxRelay sharedRelay = new OutboxRelay(
+                outboxRepository, realMessagePublisher, relayPolicy(), 5, Duration.ofSeconds(30));
+        OutboxRelayScheduler scheduler = new OutboxRelayScheduler(
+                sharedRelay, 2, Duration.ofMillis(20), Duration.ofMillis(100));
+        try {
+            scheduler.start();
+            Awaitility.await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> {
+                Integer sent = jdbc.queryForObject(
+                        "SELECT COUNT(*) FROM outboxpro_outbox WHERE status = 'SENT' AND event_id IN ("
+                                + eventIds.stream().map(id -> "?").collect(java.util.stream.Collectors.joining(","))
+                                + ")", Integer.class, eventIds.toArray());
+                assertThat(sent).isEqualTo(count);
+            });
+        } finally {
+            scheduler.stop();
+        }
+
+        Set<String> delivered = new java.util.HashSet<>();
+        org.springframework.amqp.core.Message message;
+        while ((message = rabbitTemplate.receive(QUEUE, Duration.ofSeconds(2).toMillis())) != null) {
+            delivered.add((String) message.getMessageProperties().getHeader("x-outboxpro-event-id"));
+        }
+        assertThat(delivered).containsExactlyInAnyOrderElementsOf(eventIds);
     }
 
     /** 重试策略：不允许重试，任何失败立即暴露为测试失败（DEAD 断言会失败）。 */

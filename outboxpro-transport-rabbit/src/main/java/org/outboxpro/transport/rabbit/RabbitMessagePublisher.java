@@ -1,14 +1,17 @@
 package org.outboxpro.transport.rabbit;
 
+import org.outboxpro.core.metrics.OutboxMetrics;
 import org.outboxpro.spi.persistence.OutboxRecord;
 import org.outboxpro.spi.transport.MessagePublisher;
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
 import org.springframework.amqp.rabbit.connection.CorrelationData;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  * RabbitMQ 发布器，等待 Publisher Confirm 后才向 Relay 返回成功。
@@ -20,6 +23,17 @@ import java.util.concurrent.TimeUnit;
 public final class RabbitMessagePublisher implements MessagePublisher {
     private final RabbitTemplate rabbitTemplate;
     private final long confirmTimeoutMillis;
+    private final OutboxMetrics metrics;
+
+    /**
+     * 创建不带指标上报的 RabbitMQ 发布器。
+     *
+     * @param rabbitTemplate Spring RabbitMQ 模板
+     * @param confirmTimeoutMillis Publisher Confirm 最大等待时间
+     */
+    public RabbitMessagePublisher(RabbitTemplate rabbitTemplate, long confirmTimeoutMillis) {
+        this(rabbitTemplate, confirmTimeoutMillis, OutboxMetrics.NOOP);
+    }
 
     /**
      * 创建 RabbitMQ 发布器并开启 correlated Publisher Confirm。
@@ -30,11 +44,13 @@ public final class RabbitMessagePublisher implements MessagePublisher {
      *
      * @param rabbitTemplate Spring RabbitMQ 模板
      * @param confirmTimeoutMillis Publisher Confirm 最大等待时间
+     * @param metrics 发布延迟与 Confirm 超时指标门面，可为空
      * @throws IllegalStateException 连接工厂不支持开启 Publisher Confirm 时抛出
      */
-    public RabbitMessagePublisher(RabbitTemplate rabbitTemplate, long confirmTimeoutMillis) {
+    public RabbitMessagePublisher(RabbitTemplate rabbitTemplate, long confirmTimeoutMillis, OutboxMetrics metrics) {
         this.rabbitTemplate = rabbitTemplate;
         this.confirmTimeoutMillis = confirmTimeoutMillis;
+        this.metrics = metrics == null ? OutboxMetrics.NOOP : metrics;
         if (rabbitTemplate.getConnectionFactory() instanceof CachingConnectionFactory caching) {
             caching.setPublisherConfirmType(CachingConnectionFactory.ConfirmType.CORRELATED);
             caching.setPublisherReturns(true);
@@ -53,19 +69,25 @@ public final class RabbitMessagePublisher implements MessagePublisher {
      */
     @Override
     public void publish(OutboxRecord record) {
-        CorrelationData correlation = new CorrelationData(record.eventId());
-        rabbitTemplate.convertAndSend(record.exchangeName(), record.routingKey(), record.payloadJson(), message -> {
-            // 头部与 Envelope 元数据重复保存，便于 RabbitMQ 侧诊断、链路关联和非 JSON 工具查看。
-            message.getMessageProperties().setContentType("application/json");
-            message.getMessageProperties().setHeader("x-outboxpro-event-id", record.eventId());
-            message.getMessageProperties().setHeader("x-outboxpro-event-type", record.eventType());
-            message.getMessageProperties().setHeader("x-outboxpro-trace-id", record.traceId());
-            message.getMessageProperties().setHeader("x-outboxpro-correlation-id", record.correlationId());
-            message.getMessageProperties().setHeader("x-outboxpro-causation-id", record.causationId());
-            return message;
-        }, correlation);
+        long startedNanos = System.nanoTime();
+        try {
+            CorrelationData correlation = new CorrelationData(record.eventId());
+            rabbitTemplate.convertAndSend(record.exchangeName(), record.routingKey(), record.payloadJson(), message -> {
+                // 头部与 Envelope 元数据重复保存，便于 RabbitMQ 侧诊断、链路关联和非 JSON 工具查看。
+                message.getMessageProperties().setContentType("application/json");
+                message.getMessageProperties().setHeader("x-outboxpro-event-id", record.eventId());
+                message.getMessageProperties().setHeader("x-outboxpro-event-type", record.eventType());
+                message.getMessageProperties().setHeader("x-outboxpro-trace-id", record.traceId());
+                message.getMessageProperties().setHeader("x-outboxpro-correlation-id", record.correlationId());
+                message.getMessageProperties().setHeader("x-outboxpro-causation-id", record.causationId());
+                return message;
+            }, correlation);
 
-        awaitConfirm(correlation, record.eventId());
+            awaitConfirm(correlation, record);
+        } finally {
+            metrics.publishDuration(record.eventType(), record.producer(),
+                    Duration.ofNanos(System.nanoTime() - startedNanos));
+        }
     }
 
     /**
@@ -77,6 +99,7 @@ public final class RabbitMessagePublisher implements MessagePublisher {
     public List<PublishOutcome> publishAll(List<OutboxRecord> records) {
         List<PendingConfirm> pending = new ArrayList<>(records.size());
         for (OutboxRecord record : records) {
+            long startedNanos = System.nanoTime();
             CorrelationData correlation = new CorrelationData(record.eventId());
             RuntimeException sendError = null;
             try {
@@ -94,27 +117,33 @@ public final class RabbitMessagePublisher implements MessagePublisher {
                 // 发送阶段失败（连接断开、转换异常等）的记录无需等待 Confirm。
                 sendError = error;
             }
-            pending.add(new PendingConfirm(record, sendError == null ? correlation : null, sendError));
+            pending.add(new PendingConfirm(record, sendError == null ? correlation : null, sendError, startedNanos));
         }
 
         List<PublishOutcome> outcomes = new ArrayList<>(pending.size());
         for (PendingConfirm item : pending) {
-            if (item.sendError != null) {
-                outcomes.add(PublishOutcome.failed(item.sendError));
-                continue;
-            }
             try {
-                awaitConfirm(item.correlation, item.record.eventId());
-                outcomes.add(PublishOutcome.ok());
-            } catch (RuntimeException error) {
-                outcomes.add(PublishOutcome.failed(error));
+                if (item.sendError != null) {
+                    outcomes.add(PublishOutcome.failed(item.sendError));
+                    continue;
+                }
+                try {
+                    awaitConfirm(item.correlation, item.record);
+                    outcomes.add(PublishOutcome.ok());
+                } catch (RuntimeException error) {
+                    outcomes.add(PublishOutcome.failed(error));
+                }
+            } finally {
+                metrics.publishDuration(item.record.eventType(), item.record.producer(),
+                        Duration.ofNanos(System.nanoTime() - item.startedNanos));
             }
         }
         return outcomes;
     }
 
     /** 等待单条 Publisher Confirm；超时、NACK 或中断都转换为带 eventId 的运行时异常。 */
-    private void awaitConfirm(CorrelationData correlation, String eventId) {
+    private void awaitConfirm(CorrelationData correlation, OutboxRecord record) {
+        String eventId = record.eventId();
         try {
             // 在未收到 Confirm 前，绝不能把对应 Outbox 记录改为 SENT。
             if (!correlation.getFuture().get(confirmTimeoutMillis, TimeUnit.MILLISECONDS).isAck()) {
@@ -124,12 +153,17 @@ public final class RabbitMessagePublisher implements MessagePublisher {
             Thread.currentThread().interrupt();
             throw new IllegalStateException(
                     "RabbitMQ publisher confirm wait was interrupted for event " + eventId, error);
+        } catch (TimeoutException error) {
+            metrics.publishConfirmTimeout(record.eventType(), record.producer());
+            throw new IllegalStateException(
+                    "RabbitMQ publisher confirm timed out or failed for event " + eventId, error);
         } catch (Exception error) {
             throw new IllegalStateException(
                     "RabbitMQ publisher confirm timed out or failed for event " + eventId, error);
         }
     }
 
-    /** 批量发布过程中一条记录的等待状态：记录、Confirm 句柄或发送阶段异常。 */
-    private record PendingConfirm(OutboxRecord record, CorrelationData correlation, RuntimeException sendError) { }
+    /** 批量发布过程中一条记录的等待状态：记录、Confirm 句柄、发送阶段异常与起始时间。 */
+    private record PendingConfirm(OutboxRecord record, CorrelationData correlation, RuntimeException sendError,
+                                  long startedNanos) { }
 }

@@ -196,6 +196,48 @@ class OutboxProConfigurationValidatorTest {
                 .hasMessageContaining("outboxpro.metrics.health.outbox-dead-threshold");
     }
 
+    /** V1.4 新增生产端配置：workers、空闲退避上限与批次上限都要在启动期校验。 */
+    @Test
+    void producerCapacityConfigurationBounds() {
+        OutboxProProperties noWorkers = validProperties();
+        noWorkers.getProducer().setWorkers(0);
+        assertThatThrownBy(() -> new OutboxProConfigurationValidator(noWorkers))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("outboxpro.producer.workers");
+
+        OutboxProProperties tooManyWorkers = validProperties();
+        tooManyWorkers.getProducer().setWorkers(65);
+        assertThatThrownBy(() -> new OutboxProConfigurationValidator(tooManyWorkers))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("outboxpro.producer.workers");
+
+        OutboxProProperties zeroBackoff = validProperties();
+        zeroBackoff.getProducer().setIdleBackoffMax(Duration.ZERO);
+        assertThatThrownBy(() -> new OutboxProConfigurationValidator(zeroBackoff))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("outboxpro.producer.idle-backoff-max");
+
+        OutboxProProperties oversizedBatch = validProperties();
+        oversizedBatch.getProducer().setBatchSize(10_001);
+        assertThatThrownBy(() -> new OutboxProConfigurationValidator(oversizedBatch))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("outboxpro.producer.batch-size");
+    }
+
+    /** Confirm 等待必须短于认领租约，否则租约过期会造成重复发布。 */
+    @Test
+    void confirmTimeoutMustBeShorterThanClaimTimeout() {
+        OutboxProProperties properties = validProperties();
+        properties.getProducer().setConfirmTimeout(Duration.ofSeconds(60));
+        properties.getProducer().setClaimTimeout(Duration.ofSeconds(60));
+        assertThatThrownBy(() -> new OutboxProConfigurationValidator(properties))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("outboxpro.producer.confirm-timeout");
+
+        properties.getProducer().setConfirmTimeout(Duration.ofSeconds(59));
+        assertThatCode(() -> new OutboxProConfigurationValidator(properties)).doesNotThrowAnyException();
+    }
+
     /** 保留策略各时长必须为正，批大小与单轮上限必须为正。 */
     @Test
     void retentionConfigurationBounds() {

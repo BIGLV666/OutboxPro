@@ -1,6 +1,6 @@
 # OutboxPro 观测与告警 Runbook
 
-> 适用版本：V1.3 起  
+> 适用版本：V1.4 起  
 > 目标读者：值班研发、SRE、DBA、消息中间件运维  
 > 适用范围：OutboxPro 的 Outbox 积压、DLQ 积压、健康检查与 Micrometer 指标
 
@@ -14,6 +14,7 @@
 | `outboxpro.outbox.backlog.processing` | 当前 PROCESSING 认领中数量 | 无 |
 | `outboxpro.outbox.backlog.retry_waiting` | 当前 RETRY_WAITING 等待重试数量 | 无 |
 | `outboxpro.outbox.backlog.dead` | 当前 DEAD 生产端死信数量 | 无 |
+| `outboxpro.outbox.oldest_pending_age` | 最老 PENDING/RETRY_WAITING 消息年龄（秒） | 无 |
 | `outboxpro.dlq.backlog.pending_replay` | 当前待人工重放死信总量 | 无 |
 | `outboxpro.dlq.backlog.by_reason` | 当前待人工重放死信按原因分布 | `reason` |
 
@@ -35,9 +36,24 @@
 | `outboxpro.log.sink.dropped` | 数据库日志 Sink 队列满丢弃条数 | 无 |
 | `outboxpro.log.sink.flush.failed` | 数据库日志 Sink 批量写入失败条数 | 无 |
 
-### 1.3 指标采集策略
+### 1.3 耗时 Timer（V1.4）
+
+| 指标 | 含义 | 标签 |
+|---|---|---|
+| `outboxpro.publish.duration` | 单条发布耗时；批量模式下为每条记录从写出到 Confirm 的耗时 | `event_type`、`producer` |
+| `outboxpro.publish.confirm.timeout` | Publisher Confirm 超时次数（Counter） | `event_type`、`producer` |
+| `outboxpro.relay.cycle.duration` | Relay 单轮耗时（含空轮） | `claimed=true|false` |
+| `outboxpro.consume.duration` | Handler 处理耗时 | `event_type`、`consumer`、`queue` |
+
+Timer 建议关注 p95/p99 而非平均值；`claimed=false` 的 Relay 轮次可以用于评估空闲退避效果。
+`outboxpro.publish.confirm.timeout` 增长通常意味着 Broker 或网络抖动，持续增长会推高
+`outboxpro.publish.duration`，并可能在 `claim-timeout` 内无法完成状态回写。
+
+### 1.4 指标采集策略
 
 - Gauge 读取的是共享积压快照，快照默认缓存 30 秒。
+- 自定义仓储未实现 `oldestPendingAgeSeconds` 时，`oldest_pending_age` Gauge 记为 0，
+  健康检查详情为 `"unknown"`；不要仅凭该 Gauge 判断“仓储不支持统计”。
 - Prometheus 抓取、Kubernetes 探针同时出现时，同一 TTL 窗口内只触发一次数据库聚合查询。
 - 原因分布查询只扫描 `PENDING_REPLAY`，并使用 `(status, reason_code)` 复合索引。
 - 累计原因 Counter 在死信分派成功时递增，不扫描历史台账。
@@ -63,6 +79,7 @@ GET /actuator/health
         "outboxProcessing": 0,
         "outboxRetryWaiting": 0,
         "outboxDead": 0,
+        "outboxOldestPendingAgeSeconds": 0,
         "dlqPendingReplay": 0,
         "snapshotCapturedAt": "2026-10-05T14:00:00Z",
         "outboxStatsAvailable": true,
@@ -104,6 +121,7 @@ outboxpro:
 | 告警 | 表达式建议 | 严重度 | 处理入口 |
 |---|---|---|---|
 | 生产端 DEAD | `outboxpro_outbox_backlog_dead > 0` | P1 | 第 4.1 节 |
+| 最老待投递消息超 SLA | `outboxpro_outbox_oldest_pending_age > 300` 持续 5m | P2 | 第 4.2 节 |
 | Outbox PENDING 持续积压 | `outboxpro_outbox_backlog_pending > 1000` 持续 10m | P2 | 第 4.2 节 |
 | Outbox RETRY_WAITING 持续增长 | `outboxpro_outbox_backlog_retry_waiting > 500` 持续 15m | P2 | 第 4.3 节 |
 | DLQ 待重放积压 | `outboxpro_dlq_backlog_pending_replay > 100` 持续 10m | P1 | 第 5.1 节 |
@@ -184,6 +202,14 @@ POST /actuator/outboxpro-ops/outbox/{eventId}/replay
 
 ## 6. 性能与容量提示
 
+- Relay 单实例吞吐基线（2000 条记录、真实 MySQL、零延迟 Publisher）：
+  - 1 worker / batch 500：约 950–1000 records/s；
+  - 2 worker / batch 500：约 1900 records/s；
+  - 4 worker / batch 500：约 2200 records/s。
+  详见 [性能基线](性能基线.md)。该数字不含 RabbitMQ 网络与 Confirm 等待。
+- 若 `outboxpro.relay.cycle.duration` 的 `claimed=true` 分位持续升高，
+  同时 `outboxpro.publish.duration` 正常，优先检查数据库锁等待与 `producer.workers`
+  是否超过连接池容量。
 - 积压快照刷新延迟在 25k PENDING Outbox + 25k 待重放死信下实测：
   - p50 ≈ 16ms；
   - p95 ≈ 18ms；
@@ -196,6 +222,10 @@ POST /actuator/outboxpro-ops/outbox/{eventId}/replay
 
 ```yaml
 outboxpro:
+  producer:
+    workers: 2
+    batch-size: 100
+    idle-backoff-max: 5s
   metrics:
     snapshot-ttl: 30s
     health:

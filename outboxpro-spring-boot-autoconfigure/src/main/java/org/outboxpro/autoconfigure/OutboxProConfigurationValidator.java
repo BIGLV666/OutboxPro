@@ -12,6 +12,11 @@ import java.time.Duration;
  */
 public final class OutboxProConfigurationValidator {
 
+    /** 单批认领上限：更大的批次会持有更长的行锁，并放大单次事务与内存占用。 */
+    private static final int MAX_BATCH_SIZE = 10_000;
+    /** Relay 工作线程上限：超过该值通常说明应该横向扩容实例而不是继续加线程。 */
+    private static final int MAX_WORKERS = 64;
+
     /**
      * 校验全局配置，非法时抛出携带属性名的异常。
      *
@@ -42,14 +47,33 @@ public final class OutboxProConfigurationValidator {
         if (producer.getBatchSize() <= 0) {
             throw new IllegalStateException("outboxpro.producer.batch-size must be positive");
         }
+        if (producer.getBatchSize() > MAX_BATCH_SIZE) {
+            throw new IllegalStateException("outboxpro.producer.batch-size must not exceed " + MAX_BATCH_SIZE
+                    + ": a larger batch holds row locks longer and can exhaust the database transaction");
+        }
+        if (producer.getWorkers() < 1 || producer.getWorkers() > MAX_WORKERS) {
+            throw new IllegalStateException("outboxpro.producer.workers must be between 1 and " + MAX_WORKERS);
+        }
         if (producer.getPollInterval() == null || producer.getPollInterval().isZero() || producer.getPollInterval().isNegative()) {
             throw new IllegalStateException("outboxpro.producer.poll-interval must be a positive duration, e.g. 1s");
+        }
+        if (producer.getIdleBackoffMax() == null || producer.getIdleBackoffMax().isZero()
+                || producer.getIdleBackoffMax().isNegative()) {
+            throw new IllegalStateException(
+                    "outboxpro.producer.idle-backoff-max must be a positive duration, e.g. 5s");
         }
         if (producer.getClaimTimeout() == null || producer.getClaimTimeout().isZero() || producer.getClaimTimeout().isNegative()) {
             throw new IllegalStateException("outboxpro.producer.claim-timeout must be a positive duration, e.g. 60s");
         }
         if (producer.getConfirmTimeout() == null || producer.getConfirmTimeout().isZero() || producer.getConfirmTimeout().isNegative()) {
             throw new IllegalStateException("outboxpro.producer.confirm-timeout must be a positive duration, e.g. 10s");
+        }
+        // 租约在 Confirm 等待期间过期会被其他实例重新认领，导致同一条消息被重复发布。
+        if (producer.getConfirmTimeout().compareTo(producer.getClaimTimeout()) >= 0) {
+            throw new IllegalStateException(
+                    "outboxpro.producer.confirm-timeout must be shorter than outboxpro.producer.claim-timeout: "
+                            + "otherwise the claim lease can expire while still waiting for Publisher Confirm, "
+                            + "allowing another instance to publish the same message again");
         }
     }
 

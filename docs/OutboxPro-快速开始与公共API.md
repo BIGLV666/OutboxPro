@@ -70,11 +70,11 @@ String eventId = envelope.getEventId();
 <dependency>
     <groupId>io.github.biglv666</groupId>
     <artifactId>outboxpro-spring-boot-starter</artifactId>
-    <version>1.1.0</version>
+    <version>1.4.0</version>
 </dependency>
 ```
 
-1.1.0 已发布到 Maven Central，直接依赖即可使用。
+1.4.0 已发布到 Maven Central，直接依赖即可使用。
 
 ### 3.2 application.yml
 
@@ -102,7 +102,9 @@ outboxpro:
     enabled: true
     relay-enabled: true
     batch-size: 100
+    workers: 2
     poll-interval: 1s
+    idle-backoff-max: 5s
     claim-timeout: 60s
     confirm-timeout: 10s
   consumer:

@@ -380,8 +380,10 @@ public class OutboxProAutoConfiguration {
     @Bean
     @ConditionalOnBean({ConnectionFactory.class, RabbitTemplate.class})
     @ConditionalOnMissingBean
-    MessagePublisher outboxProMessagePublisher(RabbitTemplate template, OutboxProProperties properties) {
-        return new RabbitMessagePublisher(template, properties.getProducer().getConfirmTimeout().toMillis());
+    MessagePublisher outboxProMessagePublisher(RabbitTemplate template, OutboxProProperties properties,
+                                              ObjectProvider<OutboxMetrics> metrics) {
+        return new RabbitMessagePublisher(template, properties.getProducer().getConfirmTimeout().toMillis(),
+                metrics.getIfAvailable(() -> OutboxMetrics.NOOP));
     }
 
     /**
@@ -416,7 +418,8 @@ public class OutboxProAutoConfiguration {
     @ConditionalOnBean(OutboxRelay.class)
     @ConditionalOnProperty(prefix = "outboxpro.producer", name = "enabled", havingValue = "true", matchIfMissing = true)
     OutboxRelayScheduler outboxProRelayScheduler(OutboxRelay relay, OutboxProProperties properties) {
-        return new OutboxRelayScheduler(relay, properties.getProducer().getPollInterval());
+        return new OutboxRelayScheduler(relay, properties.getProducer().getWorkers(),
+                properties.getProducer().getPollInterval(), properties.getProducer().getIdleBackoffMax());
     }
 
     /** 默认使用 SLF4J 输出消息生命周期日志；日志失败必须被隔离。 */

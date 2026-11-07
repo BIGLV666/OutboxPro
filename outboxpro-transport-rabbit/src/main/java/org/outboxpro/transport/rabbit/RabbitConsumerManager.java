@@ -219,9 +219,13 @@ public final class RabbitConsumerManager implements AutoCloseable {
             // Best Effort 分支则保证失败已经被记为 IGNORED，因此两者都可以确认原消息。
             channel.basicAck(deliveryTag, false);
             metrics.consumeSucceeded(eventType, subscription.getConsumerName(), subscription.getQueue());
+            metrics.consumeDuration(eventType, subscription.getConsumerName(), subscription.getQueue(),
+                    Duration.ofNanos(System.nanoTime() - startedNanos));
             log(stableEventId, eventType, subscription, MessageStatus.SUCCESS, attempt, startedNanos, null);
         } catch (RuntimeException error) {
             metrics.consumeFailed(eventType, subscription.getConsumerName(), subscription.getQueue());
+            metrics.consumeDuration(eventType, subscription.getConsumerName(), subscription.getQueue(),
+                    Duration.ofNanos(System.nanoTime() - startedNanos));
             handleFailure(subscription, binding, payloadJson, channel, deliveryTag, stableEventId, eventType,
                     receivedRoutingKey, attempt, startedNanos, error);
         }

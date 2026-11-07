@@ -1,6 +1,6 @@
 # OutboxPro V1 维护手册
 
-> 适用版本：V1 / `1.1.0`  
+> 适用版本：V1.4 / `1.4.0`  
 > 当前技术范围：Java 21、Spring Boot 3.5.x、MySQL 8、RabbitMQ、Spring JDBC、Jackson  
 > 文档目的：指导开发、排障、升级、发布和线上运行维护。
 
@@ -317,8 +317,10 @@ DLQ：inventory.queue.dlq
 
 | 配置 | 作用 | 调优建议 |
 |---|---|---|
-| `producer.batch-size` | Relay 单次认领量 | 先从 100 开始，观察数据库锁和 MQ 吞吐 |
+| `producer.batch-size` | Relay 单次认领量 | 先从 100 开始，观察数据库锁和 MQ 吞吐；上限 10000，建议 100–500 |
+| `producer.workers` | 单实例 Relay 工作线程数 | 建议 2–4；连接池至少 `workers + 1`，受 Broker Confirm 吞吐约束 |
 | `producer.poll-interval` | Relay 轮询间隔 | 延迟敏感场景降低，数据库压力高时提高 |
+| `producer.idle-backoff-max` | 空轮指数退避上限 | 低流量场景建议 5s–30s；有消息时立即恢复基础间隔 |
 | `producer.claim-timeout` | Outbox 认领租约 | 应大于正常发布耗时，避免重复认领 |
 | `producer.confirm-timeout` | Publisher Confirm 超时 | 应覆盖网络抖动，但不能无限等待 |
 | `consumer.concurrency` | Rabbit 消费并发 | 受 Handler CPU、数据库连接池和下游限流约束 |
@@ -333,8 +335,13 @@ DLQ：inventory.queue.dlq
 调优顺序建议：
 
 ```text
-先确认数据库连接池 → 再调整消费者并发 → 再调整 prefetch → 最后调整 Relay batch
+先确认数据库连接池 → 再调整 Relay workers/batch → 再调整消费者并发 → 最后调整 prefetch
 ```
+
+Relay 侧容量基线（2000 条记录、真实 MySQL、零延迟 Publisher）：
+单 worker + batch 500 约 950–1000 records/s；2 worker 约 1900 records/s；
+4 worker 约 2200 records/s。完整方法与解读见 [性能基线](性能基线.md)。
+若吞吐接近 `records / claim-timeout`，优先排查锁等待或 worker 异常，而不是继续加线程。
 
 ## 8. 发布和版本维护
 
@@ -355,7 +362,8 @@ DLQ：inventory.queue.dlq
 [ ] RabbitMQ 拓扑测试通过
 [ ] Reliable ACK 时序测试通过
 [ ] DDL 在新库和升级库均可执行
-[ ] README 和配置示例已更新
+[ ] README、配置示例、CHANGELOG 已更新
+[ ] 性能基线已复跑（或确认无 Relay 热点路径变更）
 [ ] 未提交真实密码、Token 或内网敏感配置
 [ ] 版本号、许可证、SCM 和发布仓库配置完整
 ```
@@ -387,7 +395,7 @@ P1 已于 2026-08-29 全部收官；V1.1（2026-09-02）交付以下能力，均
 
 发布前事项：
 
-1. 1.1.0 发布前需同步冻结 V1.1 新增公共 API（`org.outboxpro.core.annotation` 包、
+1. V1.1 发布前已同步冻结 V1.1 新增公共 API（`org.outboxpro.core.annotation` 包、
    `AnnotatedOutboxHandler`、`NonRetryableExceptions`、`OutboxProPublisher` 类型安全重载、
    SPI 查询方法、`outboxpro.ops` 配置段）。
 
@@ -409,6 +417,27 @@ P1 已于 2026-08-29 全部收官；V1.1（2026-09-02）交付以下能力，均
 - ~~数据库消息日志 Sink~~（`DatabaseMessageLogSink` 已交付：有界内存队列 + 后台批量写入
   `outboxpro_message_log`，错误信息按列宽截断，批量失败限流告警不影响主流程；
   通过 `outboxpro.observability.message-log-sink=database` 启用，默认仍为 slf4j）。
+
+### 9.2 容量与稳定性（V1.4）
+
+V1.4 在保持默认行为不变的前提下交付：
+
+- `producer.workers`：单实例多线程认领，依赖 `FOR UPDATE SKIP LOCKED`；
+  线程由 `OutboxRelayScheduler` 持有，异常只影响单轮，不会终止其他 worker；
+- `producer.idle-backoff-max`：连续空轮指数退避，认领到消息立即恢复基础间隔；
+- 新增指标：`outboxpro.publish.duration`、`outboxpro.publish.confirm.timeout`、
+  `outboxpro.relay.cycle.duration`、`outboxpro.consume.duration`；
+- `outboxpro.outbox.oldest_pending_age`：最老 PENDING/RETRY_WAITING 消息年龄（秒），
+  健康检查详情字段 `outboxOldestPendingAgeSeconds`；
+- 过期认领恢复按半个租约周期节流；认领与恢复事务使用 `READ_COMMITTED`，
+  避免 MySQL 间隙锁导致的并发认领阻塞；
+- 性能基线与复现方式见 [性能基线](性能基线.md)。
+
+升级兼容性：
+
+- 默认 `workers=1`、`idle-backoff-max=5s`，与 V1.3 行为一致；
+- `OutboxRepository.oldestPendingAgeSeconds` 为 default 方法，旧自定义仓储无需改动；
+- 未接入 Micrometer 时所有新指标自动降级 no-op。
 
 ## 10. 集成测试运行指南
 

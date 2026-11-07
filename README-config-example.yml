@@ -6,7 +6,9 @@ outboxpro:
     enabled: true
     relay-enabled: true
     batch-size: 100
+    workers: 2                 # 单实例 Relay 工作线程数，1–64；依赖 MySQL SKIP LOCKED
     poll-interval: 1s
+    idle-backoff-max: 5s       # 连续空轮时的最大轮询间隔
     claim-timeout: 60s
     confirm-timeout: 10s
   consumer:
