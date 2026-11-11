@@ -13,6 +13,7 @@ target/
 .vscode/
 .settings/
 .classpath
+.factorypath
 .project
 
 # 日志与本地运行产物
