@@ -2,30 +2,34 @@
 
 [![Maven Central](https://img.shields.io/maven-central/v/io.github.biglv666/outboxpro-spring-boot-starter)](https://central.sonatype.com/artifact/io.github.biglv666/outboxpro-spring-boot-starter) [![CI](https://github.com/BIGLV666/OutboxPro/actions/workflows/ci.yml/badge.svg)](https://github.com/BIGLV666/OutboxPro/actions/workflows/ci.yml)
 
-OutboxPro 是面向 Spring Boot 的事务消息与 RabbitMQ 操作简化组件。V1 优先支持 **MySQL + RabbitMQ + Jackson + Spring JDBC**，目标是让业务方只负责声明事件和编写 Handler。
+OutboxPro 是面向 Spring Boot 的**事务消息与 RabbitMQ 可靠消费组件**。它解决“业务已提交、消息却没发出去”或“消息重复消费”的问题：业务方只需声明事件和编写 Handler，Outbox 落库、Relay 投递、Publisher Confirm、Inbox 幂等、重试、死信与观测由框架处理。
 
-## 文档导航
+当前 V1 支持 **Java 21 + Spring Boot 3.5.x + MySQL 8 + RabbitMQ + Spring JDBC + Jackson**。
 
-- [快速开始与公共 API](docs/OutboxPro-快速开始与公共API.md)
-- [V1 维护手册](docs/OutboxPro-维护手册.md)
-- [死信队列 (DLQ) 功能](docs/DLQ-README.md)
-- [观测与告警 Runbook](docs/OutboxPro-告警Runbook.md)
-- [Relay 性能基线（V1.4）](docs/性能基线.md)
-- [变更日志](CHANGELOG.md)
-- [示例应用：10 分钟跑通全流程](outboxpro-example-order/README.md)
+## 核心特性
 
-## 模块
+- **事务内发布**：业务表与 Outbox 表在同一本地事务提交，Relay 在事务外投递并等待 Publisher Confirm。
+- **至少一次投递 + Inbox 幂等**：消费端以 `consumerName + eventId` 去重，整体最终一致。
+- **注解式声明**：`@OutboxEvent` + `@OutboxHandler` 自动生成事件定义与订阅，启动期校验配置。
+- **自动拓扑与重试**：Exchange、Queue、Retry Queue、DLQ 自动声明；支持事件级重试策略与 `@NonRetryable`。
+- **死信台账与重放**：可选台账、分桶计数、告警通知，支持生产端 DEAD 与消费端死信人工重放。
+- **可观测**：Micrometer 积压 Gauge、耗时 Timer、Confirm 超时 Counter 与 `/actuator/health` 健康检查。
+- **容量与稳定性（V1.4）**：单实例多 Relay worker（`SKIP LOCKED`）、空闲指数退避、租约恢复节流。
+- **可扩展**：Repository、Publisher、Serializer、拓扑、日志 Sink 等 SPI 可按需替换。
 
-- `outboxpro-core`：不可依赖具体中间件的领域契约。
-- `outboxpro-spi`：Repository、Publisher、Serializer、日志 Sink 扩展点。
-- `outboxpro-persistence`：Outbox Relay 与持久化模型。
-- `outboxpro-persistence-mysql`：MySQL 8 JDBC 实现和自动建表脚本。
-- `outboxpro-transport-rabbit`：RabbitMQ 发布确认、消费、拓扑、Retry Queue、DLQ。
-- `outboxpro-observability`：消息生命周期日志。
-- `outboxpro-spring-boot-autoconfigure`：Spring Boot 自动装配。
-- `outboxpro-spring-boot-starter`：业务应用开箱即用依赖。
+| 模块 | 职责 |
+|---|---|
+| `outboxpro-core` | 不依赖具体中间件的领域模型与契约 |
+| `outboxpro-spi` | Repository、Publisher、Serializer、日志 Sink 等扩展点 |
+| `outboxpro-persistence` | Outbox Relay 与持久化无关状态模型 |
+| `outboxpro-persistence-mysql` | MySQL 8 JDBC 实现与自动建表脚本 |
+| `outboxpro-transport` | 传输抽象 |
+| `outboxpro-transport-rabbit` | RabbitMQ 发布确认、消费、拓扑、Retry Queue、DLQ |
+| `outboxpro-observability` | 消息生命周期日志与指标适配 |
+| `outboxpro-spring-boot-autoconfigure` | Spring Boot 自动装配 |
+| `outboxpro-spring-boot-starter` | 业务应用开箱即用依赖 |
 
-## 业务应用依赖
+## Maven 坐标
 
 ```xml
 <dependency>
@@ -35,14 +39,16 @@ OutboxPro 是面向 Spring Boot 的事务消息与 RabbitMQ 操作简化组件�
 </dependency>
 ```
 
-应用仍需要提供 Spring Boot、MySQL 和 RabbitMQ 连接配置：
+## 最小快速开始
+
+应用需自行提供 Spring Boot、MySQL 与 RabbitMQ 连接配置：
 
 ```yaml
 spring:
   application:
     name: order-service
   datasource:
-    url: jdbc:mysql://localhost:3306/order_db?useUnicode=true&characterEncoding=utf8&serverTimezone=UTC
+    url: jdbc:mysql://localhost:3306/order_db
     username: root
     password: ${MYSQL_PASSWORD}
   rabbitmq:
@@ -52,86 +58,15 @@ spring:
     password: ${RABBITMQ_PASSWORD}
 
 outboxpro:
-  enabled: true
-  producer-name: ${spring.application.name}
-  schema-initialize: true
+  schema-initialize: true          # 默认自动建表；生产建议关闭并交给 Flyway/Liquibase
   producer:
     relay-enabled: true
-    batch-size: 100
     workers: 2
-    poll-interval: 1s
-    idle-backoff-max: 5s
-    confirm-timeout: 10s
   consumer:
     concurrency: 3
-    prefetch: 50
-  retry:
-    max-attempts: 5
-    initial-delay: 1s
-    multiplier: 2
-    max-delay: 5m
 ```
 
-默认启动时执行 `CREATE TABLE IF NOT EXISTS`。生产环境可设置 `outboxpro.schema-initialize=false`，改由 Flyway、Liquibase 或 DBA 执行：
-
-`outboxpro-persistence-mysql/src/main/resources/db/migration/mysql/`
-
-该目录包含基础表、死信台账与观测索引的 `V1`–`V6` 迁移脚本。
-
-## 声明生产事件
-
-```java
-@Bean
-public EventDefinition<OrderCreated> orderCreatedDefinition() {
-    return EventDefinition.<OrderCreated>builder()
-            .eventType("order.created")
-            .schemaVersion("v1")
-            .payloadType(OrderCreated.class)
-            .route("order.exchange", "order.created")
-            .build();
-}
-```
-
-## 声明消费订阅
-
-```java
-@Bean
-public OutboxProSubscription orderSubscription() {
-    return OutboxProSubscription.builder()
-            .name("order-subscription")
-            .exchange("order.exchange")
-            .queue("inventory-service.queue")
-            .bindings(EventBinding.reliable("order.created", "order.created", OrderCreated.class))
-            .build();
-}
-```
-
-```java
-@Component
-public class OrderCreatedHandler implements OutboxProHandler<OrderCreated> {
-    @Override public String eventType() { return "order.created"; }
-    @Override public Class<OrderCreated> payloadType() { return OrderCreated.class; }
-    @Override public void handle(EventContext<OrderCreated> context) {
-        // 只编写业务逻辑；无需手动处理 Inbox、ACK、重试或日志。
-    }
-}
-```
-
-## 在业务事务中发布
-
-```java
-@Transactional
-public void createOrder(CreateOrderCommand command) {
-    Order order = saveOrder(command);
-    publisher.publish("order.created", new OrderCreated(order.getId()));
-    // V1.1：类型安全发布，无需手写 eventType 字符串
-    // publisher.publish(OrderCreated.class, new OrderCreated(order.getId()));
-}
-```
-
-业务表和 Outbox 表写入同一个本地事务；Relay 在事务外完成 RabbitMQ 发布并等待 Publisher Confirm。
-
-## 注解式声明（V1.1，推荐）
+声明事件与 Handler，然后在业务事务中发布：
 
 ```java
 @OutboxEvent(eventType = "order.created", exchange = "order.exchange")
@@ -142,92 +77,40 @@ public record OrderCreated(Long orderId) { }
         consumerName = "inventory-service")
 public class OrderCreatedHandler extends AnnotatedOutboxHandler<OrderCreated> {
     @Override public void handle(EventContext<OrderCreated> context) {
-        // 只写业务逻辑；事件定义、订阅、Inbox、ACK、重试、死信全部由框架处理
+        // 只写业务逻辑；Inbox、ACK、重试、死信由框架处理
     }
+}
+
+@Transactional
+public void createOrder(...) {
+    orderRepository.insert(...);
+    publisher.publish(OrderCreated.class, new OrderCreated(orderId));
 }
 ```
 
-替代手写 `EventDefinition` / `OutboxProSubscription` Bean；`retry = @RetryPolicySpec(...)` 支持
-事件级重试策略覆盖。详见 [快速开始与公共 API](docs/OutboxPro-快速开始与公共API.md) 第 8 节。
-
-## 运维查询端点（V1.1，默认关闭）
-
-```yaml
-outboxpro:
-  ops:
-    enabled: true
-```
-
-开启后提供 `/actuator/outboxpro-ops`：Outbox 与死信台账分页检索、消息详情，
-以及生产端 DEAD 消息重放（`POST /outbox/{eventId}/replay`）。鉴权复用 `DlqReplayAuthorizer` SPI，
-未配置授权器时默认拒绝；详见 [DLQ 功能文档](docs/DLQ-README.md)。
-
-## 积压观测与健康检查（V1.3）
-
-启用 Micrometer 与 Actuator 后，框架会暴露 Outbox / DLQ 当前积压 Gauge、
-死信原因分布指标，并在 `/actuator/health` 中提供 OutboxPro 健康状态：
-
-```yaml
-outboxpro:
-  metrics:
-    snapshot-ttl: 30s
-    health:
-      enabled: true
-      outbox-backlog-threshold: 1000
-      outbox-dead-threshold: 1
-      dlq-pending-threshold: 100
-```
-
-Gauge 与健康检查共享同一份 TTL 快照，避免监控抓取频率放大数据库压力。
-V1.4 额外暴露最老待投递消息年龄 `outboxpro.outbox.oldest_pending_age`（秒），
-用于判断“有新消息但 Relay 没推进”的延迟问题。
-指标清单与告警处理流程见 [观测与告警 Runbook](docs/OutboxPro-告警Runbook.md)。
-
-## 容量与稳定性（V1.4）
-
-Relay 支持单实例并行认领与空闲退避：
-
-```yaml
-outboxpro:
-  producer:
-    workers: 2                 # 1–64，依赖 MySQL SKIP LOCKED 保证认领不重叠
-    batch-size: 100            # 建议 100–500
-    poll-interval: 1s          # 有消息时的基础轮询间隔
-    idle-backoff-max: 5s       # 连续空轮时指数退避的上限
-```
-
-- `workers` 线程共享同一个 `OutboxRelay` 与连接池；每个 worker 至少需要 1 个数据库连接，
-  建议连接池大小不低于 `workers + 1`。
-- 空轮时轮询间隔按 1s → 2s → 4s → 5s 退避；一旦认领到消息立即恢复 `poll-interval`。
-  系统完全空闲后到达的首条消息最坏等待 `idle-backoff-max`；延迟敏感场景可设小或
-  设为与 `poll-interval` 相同。
-- V1.4 新增发布/消费耗时 Timer、Confirm 超时 Counter 与 Relay 单轮耗时 Timer，
-  详见 Runbook。
-- 同一机器上的吞吐基线与调优建议见 [Relay 性能基线](docs/性能基线.md)。
+生产环境关闭 `schema-initialize` 时，请执行
+`outboxpro-persistence-mysql/src/main/resources/db/migration/mysql/` 下的 `V1`–`V6` 迁移脚本。
 
 ## 可靠性语义
 
-- 生产端：至少一次投递。
-- 消费端：至少一次执行 + `consumerName + eventId` Inbox 幂等。
-- 整体：最终一致。
-- V1 不承诺跨系统 Exactly Once。
+- 生产端：至少一次投递；
+- 消费端：至少一次执行 + Inbox 幂等；
+- 整体：最终一致；
+- V1 不承诺跨系统 Exactly Once，外部副作用需业务自行幂等。
 
-## 构建
+## 文档导航
 
-```powershell
-mvn clean verify
-mvn install -DskipTests
-```
+| 文档 | 内容 |
+|---|---|
+| [快速开始与公共 API](docs/OutboxPro-快速开始与公共API.md) | 完整示例、注解式声明、类型安全发布、运维端点 |
+| [运维与排障](docs/OutboxPro-运维与排障.md) | 数据库、RabbitMQ、积压判断、故障排查、配置调优 |
+| [观测与告警 Runbook](docs/OutboxPro-告警Runbook.md) | 指标清单、健康检查、告警规则与处理流程 |
+| [死信队列 (DLQ)](docs/DLQ-README.md) | 死信模式、台账、重放、FAQ |
+| [Relay 性能基线](docs/性能基线.md) | 容量结论与调优建议 |
+| [全量配置示例](README-config-example.yml) | 所有配置项参考 |
+| [订单示例](outboxpro-example-order/README.md) | 10 分钟跑通发布→消费→重试→DLQ→重放 |
+| [变更日志](CHANGELOG.md) | 版本变更与升级说明 |
 
-当前代码要求 Java 21。
+## 许可证
 
-## 发布
-
-项目已按 Maven Central（Sonatype Central）要求配置：Apache-2.0 许可证、SCM 与开发者信息、
-Sources/Javadoc Jar、GPG 签名和 `central-publishing-maven-plugin` 聚合发布。
-
-日常构建使用默认 `dev` profile（跳过签名）；发布正式版本时：
-
-1. 在 `~/.m2/settings.xml` 配置 `<server><id>central</id>` 的用户名与密码（Central 生成的 token）；
-2. 本地导入 GPG 私钥；
-3. 将版本号中的 `-SNAPSHOT` 去掉后执行 `mvn -Prelease clean deploy`。
+[Apache License 2.0](LICENSE)
